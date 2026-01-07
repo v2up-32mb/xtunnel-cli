@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type ServerConnState struct {
 	isUDP        bool
 	clientAddr   string
 	connected    bool
+	closed       bool // 防止重复注销
 	mu           sync.RWMutex
 	pendingData  [][]byte // 连接建立前到达的数据缓存
 }
@@ -91,15 +93,20 @@ func (c *ServerWSConn) writeWorker() {
 		c.mu.Lock()
 		if c.closed {
 			c.mu.Unlock()
-			continue
+			return
 		}
 		c.mu.Unlock()
 
 		_ = c.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		err := c.ws.WriteMessage(task.msgType, task.data)
 		if err != nil {
-			log.Printf("[服务端] 通道 %d 写入失败: %v", c.chID, err)
+			// 过滤正常的连接关闭错误
+			if !isClosedConnectionError(err) {
+				log.Printf("[服务端] 通道 %d 写入失败: %v", c.chID, err)
+			}
+			// 写入失败时立即退出，不再处理后续任务
 			c.pool.cleanupChannel(c.chID)
+			return
 		}
 	}
 }
@@ -575,7 +582,8 @@ func (p *ServerPool) forwardTargetToClient(st *ServerConnState) {
 	for {
 		n, err := st.targetConn.Read(buf)
 		if err != nil {
-			if err != io.EOF {
+			// 检查是否是连接被其他 goroutine 关闭（正常情况）
+			if err != io.EOF && !isClosedConnectionError(err) {
 				log.Printf("[服务端] 读取目标错误 %s: %v", st.target, err)
 			}
 			return
@@ -598,6 +606,13 @@ func (p *ServerPool) unregisterConn(connID string) {
 	}
 
 	st.mu.Lock()
+	// 防止重复注销
+	if st.closed {
+		st.mu.Unlock()
+		return
+	}
+	st.closed = true
+
 	if !st.connected {
 		st.mu.Unlock()
 		return
@@ -764,4 +779,19 @@ func (p *ServerPool) forwardUDPToClient(st *ServerConnState) {
 			_ = p.sendDownlink(st.connID, MsgUDPData, []byte(replyAddr), buf[:n])
 		}
 	}
+}
+
+// isClosedConnectionError 检查是否是连接被关闭的错误（正常情况）
+func isClosedConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "tls: bad record MAC") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "websocket: close sent") ||
+		strings.Contains(errStr, "EOF")
 }
