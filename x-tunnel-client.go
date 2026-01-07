@@ -1,3 +1,6 @@
+//go:build client
+// +build client
+
 package main
 
 import (
@@ -189,43 +192,6 @@ func main() {
 		}(rule)
 	}
 	wg.Wait()
-}
-
-func parseIPStrategy(s string) byte {
-	s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
-	switch s {
-	case "4":
-		return IPStrategyIPv4Only
-	case "6":
-		return IPStrategyIPv6Only
-	case "4,6":
-		return IPStrategyPv4Pv6
-	case "6,4":
-		return IPStrategyPv6Pv4
-	default:
-		return IPStrategyDefault
-	}
-}
-
-func isNormalCloseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-		return true
-	}
-	var ce *websocket.CloseError
-	if errors.As(err, &ce) {
-		switch ce.Code {
-		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived:
-			return true
-		}
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return true
-	}
-	return false
 }
 
 // ======================== ECH 相关（客户端） ========================
@@ -586,16 +552,16 @@ func (p *ECHPool) chIndex(chID int) (int, error) {
 func (p *ECHPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
 	for {
-		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID)
+		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID, chID)
 		if err != nil {
 			log.Printf("[客户端] 通道 %d (IP:%s) 连接失败: %v", chID, ip, err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		log.Printf("[客户端] 通道 %d 已连接", chID)
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
-		log.Printf("[客户端] 通道 %d (IP:%s) 就绪", chID, ip)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		go p.writeWorker(ctx, idx, wsConn)
@@ -752,13 +718,6 @@ func (p *ECHPool) asyncWriteDirect(chID int, msgType int, data []byte) error {
 			return fmt.Errorf("通道 %d 缓冲区拥堵", chID)
 		}
 	}
-}
-
-func shortID(id string) string {
-	if len(id) >= 8 {
-		return id[:8]
-	}
-	return id
 }
 
 func (p *ECHPool) broadcastWrite(msgType int, data []byte) {
@@ -1003,39 +962,52 @@ func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 		p.noteLastChannel(connID, chID)
 
 		switch mtype {
-		case MsgUplink:
-			p.noteUplink(connID, chID)
+		case MsgSelectUplink:
+			// 从 meta 中解析服务端选择的上行通道ID
+			var uplinkChID int
+			if len(meta) >= 4 {
+				uplinkChID = int(binary.BigEndian.Uint32(meta[0:4]))
+			} else {
+				// 兼容旧版本：使用当前处理通道
+				uplinkChID = chID
+			}
+			p.noteUplink(connID, uplinkChID)
+
+			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
+			selected, _, _, target, up, _ := p.selectDownlink(connID, chID)
+			if selected {
+				p.mu.RLock()
+				downlink := 0
+				clientAddr := ""
+				if st := p.conns[connID]; st != nil {
+					downlink = st.downlink
+					clientAddr = st.clientAddr
+				}
+				p.mu.RUnlock()
+				if downlink > 0 && target != "" {
+					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
+						clientAddr, target, up, downlink, shortID(connID))
+				}
+				// 通过 uplink 通道发送 MsgSelectDownlink，meta 中携带下行通道号
+				downlinkBytes := make([]byte, 4)
+				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
+				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, encodeMessage(MsgSelectDownlink, connID, downlinkBytes, nil))
+			}
 
 		case MsgConnStatus:
 			if len(meta) < 1 {
 				continue
 			}
 			if ConnStatus(meta[0]) == StatusOK {
-				// 不做阻塞等待，这里只作为“连接建立”的信号
+				// 不做阻塞等待，这里只作为"连接建立"的信号
 				p.signalConnected(connID)
 			} else {
 				p.Unregister(connID)
 			}
 
 		case MsgTCPData:
-			selected, chosen, start, target, up, typ := p.selectDownlink(connID, chID)
-			if selected {
-				_ = p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgSelectDownlink, connID, nil, nil))
-				if !start.IsZero() && up > 0 {
-					if typ == "" {
-						typ = "SOCKS5"
-					}
-					client := "-"
-					p.mu.RLock()
-					if st := p.conns[connID]; st != nil && st.clientAddr != "" {
-						client = st.clientAddr
-					}
-					p.mu.RUnlock()
-					ms := float64(time.Since(start)) / float64(time.Millisecond)
-					log.Printf("[客户端] %s %s 访问: %s, 通道: TX %d RX %d, ID:%s, 延迟 %.1f ms",
-						client, typ, target, up, chID, shortID(connID), ms)
-				}
-			}
+			// 下行数据：只处理来自已选中下行通道的数据
+			_, chosen, _, _, _, _ := p.selectDownlink(connID, chID)
 			if chosen != chID {
 				continue
 			}
@@ -1179,7 +1151,7 @@ func (p *ECHPool) cleanupChannel(chID int) {
 }
 
 // dialWebSocketWithECH：客户端仅支持 wss://
-func dialWebSocketWithECH(addr string, retries int, ip string, clientID string) (*websocket.Conn, error) {
+func dialWebSocketWithECH(addr string, retries int, ip string, clientID string, chID int) (*websocket.Conn, error) {
 	u, err := url.Parse(addr)
 	if err != nil {
 		return nil, err
@@ -1193,6 +1165,8 @@ func dialWebSocketWithECH(addr string, retries int, ip string, clientID string) 
 	if clientID != "" {
 		q.Set("client_id", clientID)
 	}
+	// 告诉服务端期望的通道 ID
+	q.Set("ch_id", fmt.Sprintf("%d", chID))
 	dialURL.RawQuery = q.Encode()
 	dialAddr := dialURL.String()
 
@@ -1409,9 +1383,11 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 		}
 		if chID, ok := echPool.GetUplinkChannel(connID); ok {
 			if err := echPool.SendDataDirect(chID, connID, buf[:n]); err != nil {
+				log.Printf("[客户端] 发送数据失败: %v, ID:%s", err, shortID(connID))
 				return
 			}
 		} else {
+			// uplink 还未确定，使用广播发送
 			echPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, buf[:n]))
 		}
 	}
