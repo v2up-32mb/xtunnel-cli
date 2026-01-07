@@ -1,3 +1,6 @@
+//go:build client || server
+// +build client || server
+
 package main
 
 import (
@@ -17,7 +20,7 @@ const (
 	MsgUDPData
 	MsgUDPClose
 	MsgConnStatus
-	MsgUplink
+	MsgSelectUplink
 	MsgSelectDownlink
 )
 

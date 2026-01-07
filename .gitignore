@@ -1,0 +1,36 @@
+# 编译生成的二进制文件
+x-tunnel-server
+x-tunnel-client
+x-tunnel-server-*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin
+
+# Go 编译缓存
+*.o
+*.a
+*.test
+*.out
+
+# Go 工作区文件
+go.work
+go.work.sum
+
+# 日志文件
+*.log
+/tmp/
+
+# 编辑器和 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 调试文件
+core
+*.core
