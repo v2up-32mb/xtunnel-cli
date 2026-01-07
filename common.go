@@ -38,5 +38,26 @@ func isNormalCloseError(err error) bool {
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
 	}
+	// 检查错误消息（TLS 连接关闭等情况）
+	errStr := err.Error()
+	return containsString(errStr, "tls: bad record MAC") ||
+		containsString(errStr, "use of closed network connection") ||
+		containsString(errStr, "connection reset by peer") ||
+		containsString(errStr, "broken pipe") ||
+		containsString(errStr, "connection refused")
+}
+
+// containsString 简单的字符串包含检查（避免导入 strings）
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && findSubstring(s, substr)
+}
+
+// findSubstring 查找子串
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
 	return false
 }

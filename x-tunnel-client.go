@@ -17,9 +17,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -179,6 +182,10 @@ func main() {
 	echPool = NewECHPool(forwardAddr, connectionNum, targetIPs, clientID)
 	echPool.Start()
 
+	// 监听退出信号
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	var wg sync.WaitGroup
 	for _, listenerRule := range listeners {
 		rule := strings.TrimSpace(listenerRule)
@@ -191,7 +198,22 @@ func main() {
 			runSOCKS5Listener(r)
 		}(rule)
 	}
-	wg.Wait()
+
+	// 等待退出信号或监听器退出
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-sigChan:
+		log.Printf("[客户端] 收到退出信号，正在优雅关闭...")
+		echPool.Shutdown()
+		os.Exit(0)
+	case <-done:
+		// 所有监听器已退出
+	}
 }
 
 // ======================== ECH 相关（客户端） ========================
@@ -499,6 +521,9 @@ type ECHPool struct {
 	targetIPs     []string
 	clientID      string
 
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	wsConnsMu   sync.RWMutex
 	wsConns     []*websocket.Conn
 	writeQueues []chan WriteJob
@@ -512,11 +537,14 @@ func NewECHPool(addr string, n int, ips []string, clientID string) *ECHPool {
 	if len(ips) > 0 {
 		total = len(ips) * n
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &ECHPool{
 		wsServerAddr:     addr,
 		connectionNum:    n,
 		targetIPs:        ips,
 		clientID:         clientID,
+		ctx:              ctx,
+		cancel:           cancel,
 		wsConns:          make([]*websocket.Conn, total),
 		writeQueues:      make([]chan WriteJob, total),
 		conns:            make(map[string]*ClientConnState),
@@ -541,6 +569,47 @@ func (p *ECHPool) Start() {
 	}
 }
 
+// Shutdown 优雅关闭所有 WebSocket 连接
+func (p *ECHPool) Shutdown() {
+	log.Printf("[客户端] 正在关闭所有连接...")
+
+	// 1. 取消 context，通知所有 goroutine 退出
+	p.cancel()
+
+	// 2. 关闭所有写队列，停止写入
+	for i, q := range p.writeQueues {
+		if q != nil {
+			close(q)
+			p.writeQueues[i] = nil
+		}
+	}
+
+	// 3. 优雅关闭所有 WebSocket 连接
+	p.wsConnsMu.Lock()
+	defer p.wsConnsMu.Unlock()
+
+	var wg sync.WaitGroup
+	for i, ws := range p.wsConns {
+		if ws != nil {
+			wg.Add(1)
+			go func(conn *websocket.Conn, chID int) {
+				defer wg.Done()
+				// 发送正常的关闭帧
+				_ = conn.WriteMessage(websocket.CloseMessage,
+				 websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+				// 等待对方响应或超时
+				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				_ = conn.Close()
+				log.Printf("[客户端] 通道 %d 已关闭", chID)
+			}(ws, i+1)
+			p.wsConns[i] = nil
+		}
+	}
+	wg.Wait()
+
+	log.Printf("[客户端] 所有连接已关闭")
+}
+
 func (p *ECHPool) chIndex(chID int) (int, error) {
 	idx := chID - 1
 	if idx < 0 || idx >= len(p.writeQueues) {
@@ -552,18 +621,31 @@ func (p *ECHPool) chIndex(chID int) (int, error) {
 func (p *ECHPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
 	for {
+		// 检查是否需要退出
+		select {
+		case <-p.ctx.Done():
+			log.Printf("[客户端] 通道 %d 已收到退出信号", chID)
+			return
+		default:
+		}
+
 		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID, chID)
 		if err != nil {
 			log.Printf("[客户端] 通道 %d (IP:%s) 连接失败: %v", chID, ip, err)
-			time.Sleep(3 * time.Second)
-			continue
+			// 检查是否需要退出（避免在重连延迟时阻塞）
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+				continue
+			}
 		}
 		log.Printf("[客户端] 通道 %d 已连接", chID)
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(p.ctx)
 		go p.writeWorker(ctx, idx, wsConn)
 		p.handleChannel(chID, wsConn)
 		cancel()
@@ -586,12 +668,17 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 
 	// 退出时尽量回收 globalQueueBytes
 	defer func() {
-		for {
-			select {
-			case j := <-queue:
-				atomic.AddInt64(&p.globalQueueBytes, int64(-j.size))
-			default:
-				return
+		if queue != nil {
+			for {
+				select {
+				case j, ok := <-queue:
+					if !ok {
+						return
+					}
+					atomic.AddInt64(&p.globalQueueBytes, int64(-j.size))
+				default:
+					return
+				}
 			}
 		}
 	}()
@@ -606,7 +693,12 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 			select {
 			case <-ctx.Done():
 				return
-			case job = <-queue:
+			case j, ok := <-queue:
+				if !ok {
+					// 队列已关闭
+					return
+				}
+				job = j
 			case <-ticker.C:
 				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
@@ -648,7 +740,11 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 
 		for {
 			select {
-			case next := <-queue:
+			case next, ok := <-queue:
+				if !ok {
+					// 队列已关闭
+					goto writeAgg
+				}
 				atomic.AddInt64(&p.globalQueueBytes, int64(-next.size))
 				if next.msgType != websocket.BinaryMessage {
 					pending = &next
