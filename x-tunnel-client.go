@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"flag"
@@ -62,11 +63,19 @@ var (
 	ipAddr           string
 	udpBlockPortsStr string
 	token            string
+	fallback         bool
 	insecure         bool
 	connectionNum    int
 	ips              string
 
-	clientPool *ClientPool
+	dnsServer string
+	echDomain string
+
+	echListMu sync.RWMutex
+	echList   []byte
+	refreshMu sync.Mutex
+
+	echPool *ECHPool
 
 	clientID      string
 	udpBlockPorts map[int]struct{}
@@ -82,8 +91,11 @@ func init() {
 	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式，必须是 wss://host:port/path)")
 	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（将 wss 主机名定向到该 IP 连接），多个IP用逗号分隔")
 	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表，逗号分隔，如 443,8443")
-	flag.BoolVar(&insecure, "insecure", false, "wss 模式忽略证书校验")
+	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
 	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
+	flag.StringVar(&dnsServer, "dns", "https://doh.pub/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
+	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "用于查询 ECH 公钥的域名")
+	flag.BoolVar(&fallback, "fallback", false, "是否禁用 ECH 并回落到普通 TLS 1.3 (默认 false)")
 	flag.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
 	flag.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
 }
@@ -131,6 +143,24 @@ func main() {
 		}
 	}
 
+	// wss 模式：如果开启不校验证书，则自动禁用 ECH
+	if insecure {
+		if !fallback {
+			fallback = true
+			log.Printf("[客户端] 启用 -insecure：已自动禁用 ECH（fallback）")
+		} else {
+			log.Printf("[客户端] 启用 -insecure")
+		}
+	}
+
+	if !fallback {
+		if err := prepareECH(); err != nil {
+			log.Fatalf("[客户端] 获取 ECH 公钥失败: %v", err)
+		}
+	} else {
+		log.Printf("[客户端] fallback 模式已启用：禁用 ECH，使用标准 TLS 1.3")
+	}
+
 	if udpBlockPortsStr != "" {
 		udpBlockPorts = make(map[int]struct{})
 		for _, p := range strings.Split(udpBlockPortsStr, ",") {
@@ -149,8 +179,8 @@ func main() {
 	clientID = uuid.NewString()
 	log.Printf("[客户端] 客户端ID: %s", clientID)
 
-	clientPool = NewClientPool(forwardAddr, connectionNum, targetIPs, clientID)
-	clientPool.Start()
+	echPool = NewECHPool(forwardAddr, connectionNum, targetIPs, clientID)
+	echPool.Start()
 
 	// 监听退出信号
 	sigChan := make(chan os.Signal, 1)
@@ -179,16 +209,94 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Printf("[客户端] 收到退出信号，正在优雅关闭...")
-		clientPool.Shutdown()
+		echPool.Shutdown()
 		os.Exit(0)
 	case <-done:
 		// 所有监听器已退出
 	}
 }
 
-// ======================== TLS 配置 ========================
+// ======================== ECH 相关（客户端） ========================
+// MessageType, ConnStatus, encodeMessage, decodeMessage 定义见 protocol.go
 
-func buildTLSConfig(serverName string) (*tls.Config, error) {
+const typeHTTPS = 65
+
+func prepareECH() error {
+	for {
+		log.Printf("[客户端] DNS查询 ECH: %s -> %s", dnsServer, echDomain)
+		echBase64, err := queryHTTPSRecord(echDomain, dnsServer)
+		if err != nil {
+			log.Printf("[客户端] DNS 查询失败: %v，重试...", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if echBase64 == "" {
+			log.Printf("[客户端] 未找到 ECH 参数，重试...")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(echBase64)
+		if err != nil {
+			log.Printf("[客户端] ECH Base64 解码失败: %v，重试...", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		echListMu.Lock()
+		echList = raw
+		echListMu.Unlock()
+		log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
+		return nil
+	}
+}
+
+func refreshECH() error {
+	if fallback {
+		return nil
+	}
+
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
+
+	echListMu.RLock()
+	if len(echList) > 0 {
+		echListMu.RUnlock()
+		return nil
+	}
+	echListMu.RUnlock()
+
+	log.Printf("[客户端] 刷新 ECH 配置...")
+	return prepareECH()
+}
+
+func getECHList() ([]byte, error) {
+	if fallback {
+		return nil, nil
+	}
+	echListMu.RLock()
+	defer echListMu.RUnlock()
+	if len(echList) == 0 {
+		return nil, errors.New("ECH 配置尚未加载")
+	}
+	return echList, nil
+}
+
+func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, error) {
+	roots, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:                     tls.VersionTLS13,
+		ServerName:                     serverName,
+		EncryptedClientHelloConfigList: echList,
+		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
+			return errors.New("服务器拒绝 ECH")
+		},
+		RootCAs: roots,
+	}, nil
+}
+
+func buildStandardTLSConfig(serverName string) (*tls.Config, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
 		return nil, err
@@ -199,6 +307,186 @@ func buildTLSConfig(serverName string) (*tls.Config, error) {
 		RootCAs:            roots,
 		InsecureSkipVerify: insecure,
 	}, nil
+}
+
+func buildUnifiedTLSConfig(serverName string) (*tls.Config, error) {
+	if fallback {
+		return buildStandardTLSConfig(serverName)
+	}
+	ech, e := getECHList()
+	if e != nil {
+		return nil, e
+	}
+	cfgTLS, err := buildTLSConfigWithECH(serverName, ech)
+	if err != nil {
+		return nil, err
+	}
+	cfgTLS.InsecureSkipVerify = insecure
+	return cfgTLS, nil
+}
+
+func queryHTTPSRecord(domain, dnsServer string) (string, error) {
+	if strings.HasPrefix(dnsServer, "http://") || strings.HasPrefix(dnsServer, "https://") {
+		return queryDoH(domain, dnsServer)
+	}
+	return queryDNSUDP(domain, dnsServer)
+}
+
+func queryDNSUDP(domain, dnsServer string) (string, error) {
+	if !strings.Contains(dnsServer, ":") {
+		dnsServer = dnsServer + ":53"
+	}
+	query := buildDNSQuery(domain, typeHTTPS)
+
+	conn, err := net.Dial("udp", dnsServer)
+	if err != nil {
+		return "", fmt.Errorf("连接 DNS 服务器失败: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	if _, err = conn.Write(query); err != nil {
+		return "", fmt.Errorf("发送查询失败: %v", err)
+	}
+
+	response := make([]byte, 4096)
+	n, err := conn.Read(response)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return "", fmt.Errorf("DNS 查询超时")
+		}
+		return "", fmt.Errorf("读取 DNS 响应失败: %v", err)
+	}
+	return parseDNSResponse(response[:n])
+}
+
+func queryDoH(domain, dohURL string) (string, error) {
+	u, err := url.Parse(dohURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	dnsQuery := buildDNSQuery(domain, typeHTTPS)
+	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
+	q.Set("dns", dnsBase64)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/dns-message")
+	req.Header.Set("Content-Type", "application/dns-message")
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("DoH 状态码: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return parseDNSResponse(body)
+}
+
+func buildDNSQuery(domain string, qtype uint16) []byte {
+	query := make([]byte, 0, 512)
+	// ID=0x0001, RD=1
+	query = append(query, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+	for _, label := range strings.Split(domain, ".") {
+		query = append(query, byte(len(label)))
+		query = append(query, []byte(label)...)
+	}
+	query = append(query, 0x00)
+	query = append(query, byte(qtype>>8), byte(qtype), 0x00, 0x01)
+	return query
+}
+
+func parseDNSResponse(response []byte) (string, error) {
+	if len(response) < 12 {
+		return "", fmt.Errorf("响应过短")
+	}
+	ancount := binary.BigEndian.Uint16(response[6:8])
+	if ancount == 0 {
+		return "", fmt.Errorf("无答案记录")
+	}
+
+	offset := 12
+	for offset < len(response) && response[offset] != 0 {
+		offset += int(response[offset]) + 1
+	}
+	offset += 5 // 0 + QTYPE(2) + QCLASS(2)
+
+	for i := 0; i < int(ancount); i++ {
+		if offset >= len(response) {
+			break
+		}
+		// NAME: pointer or labels
+		if response[offset]&0xC0 == 0xC0 {
+			offset += 2
+		} else {
+			for offset < len(response) && response[offset] != 0 {
+				offset += int(response[offset]) + 1
+			}
+			offset++
+		}
+		if offset+10 > len(response) {
+			break
+		}
+		rrType := binary.BigEndian.Uint16(response[offset : offset+2])
+		offset += 8 // TYPE(2)+CLASS(2)+TTL(4)
+		dataLen := binary.BigEndian.Uint16(response[offset : offset+2])
+		offset += 2
+		if offset+int(dataLen) > len(response) {
+			break
+		}
+		data := response[offset : offset+int(dataLen)]
+		offset += int(dataLen)
+		if rrType == typeHTTPS {
+			if ech := parseHTTPSRecord(data); ech != "" {
+				return ech, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func parseHTTPSRecord(data []byte) string {
+	if len(data) < 2 {
+		return ""
+	}
+	offset := 2 // priority
+	// targetName (root=0) or labels
+	if offset < len(data) && data[offset] == 0 {
+		offset++
+	} else {
+		for offset < len(data) && data[offset] != 0 {
+			offset += int(data[offset]) + 1
+		}
+		offset++
+	}
+	// params: key(2) len(2) value(len)
+	for offset+4 <= len(data) {
+		key := binary.BigEndian.Uint16(data[offset : offset+2])
+		length := binary.BigEndian.Uint16(data[offset+2 : offset+4])
+		offset += 4
+		if offset+int(length) > len(data) {
+			break
+		}
+		value := data[offset : offset+int(length)]
+		offset += int(length)
+		// ECHConfigList is parameter key=5
+		if key == 5 {
+			return base64.StdEncoding.EncodeToString(value)
+		}
+	}
+	return ""
 }
 
 // ======================== 多通道客户端池 ========================
@@ -223,7 +511,7 @@ type ClientConnState struct {
 	closed     bool
 }
 
-type ClientPool struct {
+type ECHPool struct {
 	globalQueueBytes int64
 	globalQueueLimit int64
 	nextChannel      uint64
@@ -244,13 +532,13 @@ type ClientPool struct {
 	conns map[string]*ClientConnState
 }
 
-func NewClientPool(addr string, n int, ips []string, clientID string) *ClientPool {
+func NewECHPool(addr string, n int, ips []string, clientID string) *ECHPool {
 	total := n
 	if len(ips) > 0 {
 		total = len(ips) * n
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &ClientPool{
+	p := &ECHPool{
 		wsServerAddr:     addr,
 		connectionNum:    n,
 		targetIPs:        ips,
@@ -269,7 +557,7 @@ func NewClientPool(addr string, n int, ips []string, clientID string) *ClientPoo
 	return p
 }
 
-func (p *ClientPool) Start() {
+func (p *ECHPool) Start() {
 	for i := 0; i < len(p.writeQueues); i++ {
 		ip := ""
 		if len(p.targetIPs) > 0 {
@@ -282,7 +570,7 @@ func (p *ClientPool) Start() {
 }
 
 // Shutdown 优雅关闭所有 WebSocket 连接
-func (p *ClientPool) Shutdown() {
+func (p *ECHPool) Shutdown() {
 	log.Printf("[客户端] 正在关闭所有连接...")
 
 	// 1. 取消 context，通知所有 goroutine 退出
@@ -322,7 +610,7 @@ func (p *ClientPool) Shutdown() {
 	log.Printf("[客户端] 所有连接已关闭")
 }
 
-func (p *ClientPool) chIndex(chID int) (int, error) {
+func (p *ECHPool) chIndex(chID int) (int, error) {
 	idx := chID - 1
 	if idx < 0 || idx >= len(p.writeQueues) {
 		return -1, fmt.Errorf("无效的通道ID %d", chID)
@@ -330,7 +618,7 @@ func (p *ClientPool) chIndex(chID int) (int, error) {
 	return idx, nil
 }
 
-func (p *ClientPool) dialAndServe(idx int, ip string) {
+func (p *ECHPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
 	for {
 		// 检查是否需要退出
@@ -341,7 +629,7 @@ func (p *ClientPool) dialAndServe(idx int, ip string) {
 		default:
 		}
 
-		wsConn, err := dialWebSocket(p.wsServerAddr, ip, p.clientID, chID)
+		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID, chID)
 		if err != nil {
 			log.Printf("[客户端] 通道 %d (IP:%s) 连接失败: %v", chID, ip, err)
 			// 检查是否需要退出（避免在重连延迟时阻塞）
@@ -373,7 +661,7 @@ func (p *ClientPool) dialAndServe(idx int, ip string) {
 	}
 }
 
-func (p *ClientPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn) {
+func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn) {
 	queue := p.writeQueues[id]
 	ticker := time.NewTicker(cfg.PingInterval)
 	defer ticker.Stop()
@@ -500,7 +788,7 @@ func (p *ClientPool) writeWorker(ctx context.Context, id int, conn *websocket.Co
 	}
 }
 
-func (p *ClientPool) asyncWriteDirect(chID int, msgType int, data []byte) error {
+func (p *ECHPool) asyncWriteDirect(chID int, msgType int, data []byte) error {
 	idx, err := p.chIndex(chID)
 	if err != nil {
 		return err
@@ -528,7 +816,7 @@ func (p *ClientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 	}
 }
 
-func (p *ClientPool) broadcastWrite(msgType int, data []byte) {
+func (p *ECHPool) broadcastWrite(msgType int, data []byte) {
 	p.wsConnsMu.RLock()
 	sent := false
 	for i, c := range p.wsConns {
@@ -548,7 +836,7 @@ func (p *ClientPool) broadcastWrite(msgType int, data []byte) {
 	_ = p.asyncWriteDirect(idx+1, msgType, data)
 }
 
-func (p *ClientPool) noteUplink(connID string, chID int) {
+func (p *ECHPool) noteUplink(connID string, chID int) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -561,7 +849,7 @@ func (p *ClientPool) noteUplink(connID string, chID int) {
 	p.mu.Unlock()
 }
 
-func (p *ClientPool) noteLastChannel(connID string, chID int) {
+func (p *ECHPool) noteLastChannel(connID string, chID int) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st != nil {
@@ -570,7 +858,7 @@ func (p *ClientPool) noteLastChannel(connID string, chID int) {
 	p.mu.Unlock()
 }
 
-func (p *ClientPool) GetUplinkChannel(connID string) (int, bool) {
+func (p *ECHPool) GetUplinkChannel(connID string) (int, bool) {
 	p.mu.RLock()
 	st := p.conns[connID]
 	p.mu.RUnlock()
@@ -580,7 +868,7 @@ func (p *ClientPool) GetUplinkChannel(connID string) (int, bool) {
 	return st.uplink, true
 }
 
-func (p *ClientPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string) {
+func (p *ECHPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -613,7 +901,7 @@ func (p *ClientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	p.broadcastWrite(websocket.BinaryMessage, msg)
 }
 
-func (p *ClientPool) RegisterUDP(connID string, assoc *UDPAssociation) {
+func (p *ECHPool) RegisterUDP(connID string, assoc *UDPAssociation) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -635,7 +923,7 @@ func (p *ClientPool) RegisterUDP(connID string, assoc *UDPAssociation) {
 	p.mu.Unlock()
 }
 
-func (p *ClientPool) StartUDPRace(connID, target string) {
+func (p *ECHPool) StartUDPRace(connID, target string) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -657,7 +945,7 @@ func (p *ClientPool) StartUDPRace(connID, target string) {
 	p.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgUDPConnect, connID, meta, nil))
 }
 
-func (p *ClientPool) Unregister(connID string) {
+func (p *ECHPool) Unregister(connID string) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -713,7 +1001,7 @@ func (p *ClientPool) Unregister(connID string) {
 	p.mu.Unlock()
 }
 
-func (p *ClientPool) selectDownlink(connID string, chID int) (selected bool, chosen int, start time.Time, target string, uplink int, typ string) {
+func (p *ECHPool) selectDownlink(connID string, chID int) (selected bool, chosen int, start time.Time, target string, uplink int, typ string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	st := p.conns[connID]
@@ -738,7 +1026,7 @@ func (p *ClientPool) selectDownlink(connID string, chID int) (selected bool, cho
 	return
 }
 
-func (p *ClientPool) handleChannel(chID int, conn *websocket.Conn) {
+func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 		return nil
@@ -782,23 +1070,21 @@ func (p *ClientPool) handleChannel(chID int, conn *websocket.Conn) {
 			p.noteUplink(connID, uplinkChID)
 
 			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
-			selected, _, _, target, up, _ := p.selectDownlink(connID, chID)
+			selected, chosen, _, target, up, _ := p.selectDownlink(connID, chID)
 			if selected {
 				p.mu.RLock()
-				downlink := 0
 				clientAddr := ""
 				if st := p.conns[connID]; st != nil {
-					downlink = st.downlink
 					clientAddr = st.clientAddr
 				}
 				p.mu.RUnlock()
-				if downlink > 0 && target != "" {
+				if chosen > 0 && target != "" {
 					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
-						clientAddr, target, up, downlink, shortID(connID))
+						clientAddr, target, up, chosen, shortID(connID))
 				}
 				// 通过 uplink 通道发送 MsgSelectDownlink，meta 中携带下行通道号
 				downlinkBytes := make([]byte, 4)
-				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
+				binary.BigEndian.PutUint32(downlinkBytes, uint32(chosen))
 				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, encodeMessage(MsgSelectDownlink, connID, downlinkBytes, nil))
 			}
 
@@ -898,7 +1184,7 @@ func (p *ClientPool) handleChannel(chID int, conn *websocket.Conn) {
 	}
 }
 
-func (p *ClientPool) signalConnected(id string) {
+func (p *ECHPool) signalConnected(id string) {
 	p.mu.RLock()
 	st := p.conns[id]
 	var ch chan bool
@@ -914,24 +1200,24 @@ func (p *ClientPool) signalConnected(id string) {
 	}
 }
 
-func (p *ClientPool) SendDataDirect(chID int, connID string, b []byte) error {
+func (p *ECHPool) SendDataDirect(chID int, connID string, b []byte) error {
 	return p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, b))
 }
 
-func (p *ClientPool) SendCloseDirect(chID int, connID string) error {
+func (p *ECHPool) SendCloseDirect(chID int, connID string) error {
 	return p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgTCPClose, connID, nil, nil))
 }
 
-func (p *ClientPool) SendUDPDataDirect(chID int, connID string, data []byte) error {
+func (p *ECHPool) SendUDPDataDirect(chID int, connID string, data []byte) error {
 	return p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgUDPData, connID, nil, data))
 }
 
-func (p *ClientPool) SendUDPCloseDirect(chID int, connID string) {
+func (p *ECHPool) SendUDPCloseDirect(chID int, connID string) {
 	_ = p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgUDPClose, connID, nil, nil))
 	p.Unregister(connID)
 }
 
-func (p *ClientPool) cleanupChannel(chID int) {
+func (p *ECHPool) cleanupChannel(chID int) {
 	p.mu.Lock()
 	var toClose []string
 	for id, st := range p.conns {
@@ -958,8 +1244,8 @@ func (p *ClientPool) cleanupChannel(chID int) {
 	}
 }
 
-// dialWebSocket：客户端仅支持 wss://
-func dialWebSocket(addr string, ip string, clientID string, chID int) (*websocket.Conn, error) {
+// dialWebSocketWithECH：客户端仅支持 wss://
+func dialWebSocketWithECH(addr string, retries int, ip string, clientID string, chID int) (*websocket.Conn, error) {
 	u, err := url.Parse(addr)
 	if err != nil {
 		return nil, err
@@ -979,35 +1265,48 @@ func dialWebSocket(addr string, ip string, clientID string, chID int) (*websocke
 	dialAddr := dialURL.String()
 
 	serverName := u.Hostname()
-	tlsCfg, err := buildTLSConfig(serverName)
-	if err != nil {
-		return nil, err
-	}
-
-	dialer := websocket.Dialer{
-		TLSClientConfig:  tlsCfg,
-		HandshakeTimeout: cfg.WSHandshakeTimeout,
-		ReadBufferSize:   cfg.ReadBuf64K,
-		WriteBufferSize:  cfg.ReadBuf64K,
-	}
-	if token != "" {
-		dialer.Subprotocols = []string{token}
-	}
-	if ip != "" {
-		dialer.NetDial = func(network, address string) (net.Conn, error) {
-			_, port, _ := net.SplitHostPort(address)
-			return net.DialTimeout(network, net.JoinHostPort(ip, port), cfg.DialTimeout)
+	for i := 1; i <= retries; i++ {
+		tlsCfg, e := buildUnifiedTLSConfig(serverName)
+		if e != nil {
+			if i < retries {
+				_ = refreshECH()
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			return nil, e
 		}
-	}
 
-	conn, resp, err := dialer.Dial(dialAddr, nil)
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-			return nil, fmt.Errorf("认证失败：Token 不匹配或未提供")
+		dialer := websocket.Dialer{
+			TLSClientConfig:  tlsCfg,
+			HandshakeTimeout: cfg.WSHandshakeTimeout,
+			ReadBufferSize:   cfg.ReadBuf64K,
+			WriteBufferSize:  cfg.ReadBuf64K,
 		}
-		return nil, err
+		if token != "" {
+			dialer.Subprotocols = []string{token}
+		}
+		if ip != "" {
+			dialer.NetDial = func(network, address string) (net.Conn, error) {
+				_, port, _ := net.SplitHostPort(address)
+				return net.DialTimeout(network, net.JoinHostPort(ip, port), cfg.DialTimeout)
+			}
+		}
+
+		conn, resp, err := dialer.Dial(dialAddr, nil)
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+				return nil, fmt.Errorf("认证失败：Token 不匹配或未提供")
+			}
+			if !fallback && (strings.Contains(err.Error(), "ECH") || strings.Contains(err.Error(), "ech")) && i < retries {
+				_ = refreshECH()
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			return nil, err
+		}
+		return conn, nil
 	}
-	return conn, nil
+	return nil, fmt.Errorf("连接失败")
 }
 
 // ======================== SOCKS5 代理（客户端监听） ========================
@@ -1155,20 +1454,20 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 		return
 	}
 
-	clientPool.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
+	echPool.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
 
 	bufPtr := buf32kPool.Get().(*[]byte)
 	buf := *bufPtr
 	defer buf32kPool.Put(bufPtr)
 
 	defer func() {
-		if chID, ok := clientPool.GetUplinkChannel(connID); ok {
-			_ = clientPool.SendCloseDirect(chID, connID)
+		if chID, ok := echPool.GetUplinkChannel(connID); ok {
+			_ = echPool.SendCloseDirect(chID, connID)
 		} else {
-			clientPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPClose, connID, nil, nil))
+			echPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPClose, connID, nil, nil))
 		}
 		_ = c.Close()
-		clientPool.Unregister(connID)
+		echPool.Unregister(connID)
 	}()
 
 	for {
@@ -1176,14 +1475,14 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 		if err != nil {
 			return
 		}
-		if chID, ok := clientPool.GetUplinkChannel(connID); ok {
-			if err := clientPool.SendDataDirect(chID, connID, buf[:n]); err != nil {
+		if chID, ok := echPool.GetUplinkChannel(connID); ok {
+			if err := echPool.SendDataDirect(chID, connID, buf[:n]); err != nil {
 				log.Printf("[客户端] 发送数据失败: %v, ID:%s", err, shortID(connID))
 				return
 			}
 		} else {
 			// uplink 还未确定，使用广播发送
-			clientPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, buf[:n]))
+			echPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, buf[:n]))
 		}
 	}
 }
@@ -1193,7 +1492,7 @@ type UDPAssociation struct {
 	tcpConn       net.Conn
 	udpListener   *net.UDPConn
 	clientUDPAddr *net.UDPAddr
-	pool          *ClientPool
+	pool          *ECHPool
 
 	mu        sync.Mutex
 	closed    bool
@@ -1230,11 +1529,11 @@ func handleSOCKS5UDP(c net.Conn, cfgp *ProxyConfig) {
 		connID:      connID,
 		tcpConn:     c,
 		udpListener: ul,
-		pool:        clientPool,
+		pool:        echPool,
 		done:        make(chan bool, 5),
 		channelID:   -1,
 	}
-	clientPool.RegisterUDP(connID, assoc)
+	echPool.RegisterUDP(connID, assoc)
 
 	go assoc.loop()
 
