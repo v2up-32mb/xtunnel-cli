@@ -490,7 +490,6 @@ func (p *ServerPool) handleTCPData(chID int, connID string, payload []byte) {
 
 	st.mu.RLock()
 	targetConn := st.targetConn
-	downlinkChID := st.downlinkChID
 	st.mu.RUnlock()
 
 	if targetConn == nil {
@@ -504,17 +503,16 @@ func (p *ServerPool) handleTCPData(chID int, connID string, payload []byte) {
 		return
 	}
 
-	// 如果 downlink 还未确定，接受来自任何通道的数据
-	// 如果 downlink 已确定，只接受来自 uplink 通道的数据
-	if downlinkChID > 0 {
-		st.mu.RLock()
-		uplinkChID := st.uplinkChID
-		st.mu.RUnlock()
-		if uplinkChID > 0 && chID != uplinkChID {
-			log.Printf("[服务端] 警告: 收到来自通道 %d 的数据，但上行通道是 %d, ID:%s，忽略",
-				chID, uplinkChID, shortID(connID))
-			return
-		}
+	// 只接受来自上行通道的数据，其余通道丢弃
+	st.mu.RLock()
+	uplinkChID := st.uplinkChID
+	st.mu.RUnlock()
+
+	if uplinkChID > 0 && chID != uplinkChID {
+		// 调试日志：需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的数据，但上行通道是 %d, ID:%s，忽略",
+		// 	chID, uplinkChID, shortID(connID))
+		return
 	}
 
 	_, err := targetConn.Write(payload)
@@ -687,8 +685,10 @@ func (p *ServerPool) handleUDPConnect(chID int, connID string, meta []byte) {
 		st.clientAddr = wsConn.clientID
 	}
 
-	// 发送 MsgSelectUplink（广播）
-	_ = p.sendDownlink(connID, MsgSelectUplink, nil, nil)
+	// 发送 MsgSelectUplink（广播），携带上行通道ID
+	uplinkChIDBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
+	_ = p.sendDownlink(connID, MsgSelectUplink, uplinkChIDBytes, nil)
 
 	log.Printf("[服务端] %s UDP 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, shortID(connID))
 
@@ -705,21 +705,16 @@ func (p *ServerPool) handleUDPData(chID int, connID string, meta, payload []byte
 		return
 	}
 
-	// 如果 downlink 还未确定，接受来自任何通道的数据
-	// 如果 downlink 已确定，只接受来自 uplink 通道的数据
+	// 只接受来自上行通道的数据，其余通道丢弃
 	st.mu.RLock()
-	downlinkChID := st.downlinkChID
+	uplinkChID := st.uplinkChID
 	st.mu.RUnlock()
 
-	if downlinkChID > 0 {
-		st.mu.RLock()
-		uplinkChID := st.uplinkChID
-		st.mu.RUnlock()
-		if uplinkChID > 0 && chID != uplinkChID {
-			log.Printf("[服务端] 警告: 收到来自通道 %d 的 UDP 数据，但上行通道是 %d, ID:%s，忽略",
-				chID, uplinkChID, shortID(connID))
-			return
-		}
+	if uplinkChID > 0 && chID != uplinkChID {
+		// 调试日志：需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的 UDP 数据，但上行通道是 %d, ID:%s，忽略",
+		// 	chID, uplinkChID, shortID(connID))
+		return
 	}
 
 	// meta 是目标地址字符串
