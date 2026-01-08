@@ -74,7 +74,7 @@ var (
 )
 
 const (
-	// IP 策略常量定义见 protocol.go
+// IP 策略常量定义见 protocol.go
 )
 
 func init() {
@@ -308,7 +308,7 @@ func (p *ClientPool) Shutdown() {
 				defer wg.Done()
 				// 发送正常的关闭帧
 				_ = conn.WriteMessage(websocket.CloseMessage,
-				 websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 				// 等待对方响应或超时
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				_ = conn.Close()
@@ -557,6 +557,9 @@ func (p *ClientPool) noteUplink(connID string, chID int) {
 	}
 	if st.uplink == 0 {
 		st.uplink = chID
+	} else if st.uplink != chID {
+		// 调试日志：上行通道被覆盖时记录（需要时可解除注释）
+		// log.Printf("[客户端] 警告: 连接 %s 的上行通道从 %d 变更为 %d", shortID(connID), st.uplink, chID)
 	}
 	p.mu.Unlock()
 }
@@ -850,7 +853,9 @@ func (p *ClientPool) handleChannel(chID int, conn *websocket.Conn) {
 		case MsgUDPData:
 			selected, chosen, start, target, up, typ := p.selectDownlink(connID, chID)
 			if selected {
-				_ = p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgSelectDownlink, connID, nil, nil))
+				downlinkBytes := make([]byte, 4)
+				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
+				_ = p.asyncWriteDirect(chID, websocket.BinaryMessage, encodeMessage(MsgSelectDownlink, connID, downlinkBytes, nil))
 				if !start.IsZero() && up > 0 {
 					if typ == "" {
 						typ = "SOCKS5 UDP"
