@@ -1,5 +1,4 @@
-//go:build client || server
-// +build client || server
+//go:build client
 
 package main
 
@@ -7,11 +6,17 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
-// shortID 返回短格式的连接 ID（用于日志）
+// shortID 生成短 ID（用于日志输出）
+//
+// 参数:
+//   - id: 原始连接 ID
+//
+// 返回前 8 个字符的短 ID
 func shortID(id string) string {
 	if len(id) >= 8 {
 		return id[:8]
@@ -20,13 +25,26 @@ func shortID(id string) string {
 }
 
 // isNormalCloseError 判断是否为正常的关闭错误
+//
+// 正常关闭的错误包括：
+// - io.EOF、net.ErrClosed 等标准错误
+// - WebSocket 正常关闭码（1000、1001、1005）
+// - 网络超时错误
+// - TLS 连接关闭相关的错误消息
+//
+// 参数:
+//   - err: 待检查的错误
+//
+// 返回是否为正常的关闭错误
 func isNormalCloseError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// 标准关闭错误
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	// WebSocket 关闭错误
 	var ce *websocket.CloseError
 	if errors.As(err, &ce) {
 		switch ce.Code {
@@ -34,30 +52,16 @@ func isNormalCloseError(err error) bool {
 			return true
 		}
 	}
+	// 网络超时
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
 	}
 	// 检查错误消息（TLS 连接关闭等情况）
 	errStr := err.Error()
-	return containsString(errStr, "tls: bad record MAC") ||
-		containsString(errStr, "use of closed network connection") ||
-		containsString(errStr, "connection reset by peer") ||
-		containsString(errStr, "broken pipe") ||
-		containsString(errStr, "connection refused")
-}
-
-// containsString 简单的字符串包含检查（避免导入 strings）
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && findSubstring(s, substr)
-}
-
-// findSubstring 查找子串
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(errStr, "tls: bad record MAC") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection refused")
 }
