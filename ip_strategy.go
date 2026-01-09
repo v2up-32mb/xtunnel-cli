@@ -1,5 +1,4 @@
-//go:build client || server
-// +build client || server
+//go:build client
 
 package main
 
@@ -9,6 +8,18 @@ import (
 )
 
 // parseIPStrategy 解析 IP 策略字符串
+//
+// 支持的格式:
+//   - "" 或 "default": IPStrategyDefault
+//   - "4": IPStrategyIPv4Only
+//   - "6": IPStrategyIPv6Only
+//   - "4,6": IPStrategyPv4Pv6
+//   - "6,4": IPStrategyPv6Pv4
+//
+// 参数:
+//   - s: 策略字符串
+//
+// 返回策略代码
 func parseIPStrategy(s string) byte {
 	s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
 	switch s {
@@ -26,7 +37,12 @@ func parseIPStrategy(s string) byte {
 }
 
 // resolveWithStrategy 根据 IP 策略解析目标地址
-// 返回格式化的地址，优先返回指定类型的 IP
+//
+// 参数:
+//   - target: 目标地址（host:port 格式）
+//   - strategy: IP 策略
+//
+// 返回格式化后的地址（IPv6 地址会自动添加括号）
 func resolveWithStrategy(target string, strategy byte) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -58,6 +74,8 @@ func resolveWithStrategy(target string, strategy byte) string {
 }
 
 // resolveIPv4Only 仅返回 IPv4 地址
+//
+// 如果域名没有 IPv4 地址，返回原始 host:port
 func resolveIPv4Only(host, port string) string {
 	addrs, err := net.LookupIP(host)
 	if err != nil {
@@ -72,6 +90,8 @@ func resolveIPv4Only(host, port string) string {
 }
 
 // resolveIPv6Only 仅返回 IPv6 地址
+//
+// 如果域名没有 IPv6 地址，返回原始 [host]:port
 func resolveIPv6Only(host, port string) string {
 	addrs, err := net.LookupIP(host)
 	if err != nil {
@@ -86,6 +106,8 @@ func resolveIPv6Only(host, port string) string {
 }
 
 // resolveIPv4First 优先返回 IPv4 地址
+//
+// 如果没有 IPv4 地址，则尝试 IPv6
 func resolveIPv4First(host, port string) string {
 	addrs, err := net.LookupIP(host)
 	if err != nil {
@@ -107,6 +129,8 @@ func resolveIPv4First(host, port string) string {
 }
 
 // resolveIPv6First 优先返回 IPv6 地址
+//
+// 如果没有 IPv6 地址，则尝试 IPv4
 func resolveIPv6First(host, port string) string {
 	addrs, err := net.LookupIP(host)
 	if err != nil {
