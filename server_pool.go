@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,8 +37,13 @@ type ServerConnState struct {
 	pendingData  [][]byte // 连接建立前到达的数据缓存
 }
 
-// ======================== WebSocket 连接 ========================
+// writeTask 写入任务
+type writeTask struct {
+	msgType int
+	data    []byte
+}
 
+// ServerWSConn WebSocket 连接
 type ServerWSConn struct {
 	ws        *websocket.Conn
 	chID      int
@@ -48,118 +52,6 @@ type ServerWSConn struct {
 	mu        sync.Mutex
 	closed    bool
 	writeChan chan writeTask
-}
-
-type writeTask struct {
-	msgType int
-	data    []byte
-}
-
-func (c *ServerWSConn) start() {
-	// 启动写入协程，序列化所有写入操作
-	c.writeChan = make(chan writeTask, 256)
-	go c.writeWorker()
-
-	// 启动 Ping 保活协程
-	go c.pingSender()
-}
-
-func (c *ServerWSConn) pingSender() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			c.mu.Lock()
-			if c.closed {
-				c.mu.Unlock()
-				return
-			}
-			c.mu.Unlock()
-
-			// 通过 writeChan 发送 Ping，确保写入序列化
-			select {
-			case c.writeChan <- writeTask{msgType: websocket.PingMessage, data: []byte{}}:
-			default:
-				log.Printf("[服务端] 通道 %d 写入队列满，Ping 丢弃", c.chID)
-			}
-		}
-	}
-}
-
-func (c *ServerWSConn) writeWorker() {
-	for task := range c.writeChan {
-		c.mu.Lock()
-		if c.closed {
-			c.mu.Unlock()
-			return
-		}
-		c.mu.Unlock()
-
-		_ = c.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		err := c.ws.WriteMessage(task.msgType, task.data)
-		if err != nil {
-			// 过滤正常的连接关闭错误
-			if !isClosedConnectionError(err) {
-				log.Printf("[服务端] 通道 %d 写入失败: %v", c.chID, err)
-			}
-			// 写入失败时立即退出，不再处理后续任务
-			c.pool.cleanupChannel(c.chID)
-			return
-		}
-	}
-}
-
-func (c *ServerWSConn) asyncWrite(msgType int, data []byte) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-
-	select {
-	case c.writeChan <- writeTask{msgType: msgType, data: data}:
-	default:
-		log.Printf("[服务端] 通道 %d 写入队列满，丢弃消息", c.chID)
-	}
-}
-
-func (c *ServerWSConn) readLoop() {
-	defer c.pool.cleanupChannel(c.chID)
-
-	// 设置 Ping 处理器
-	c.ws.SetPongHandler(func(string) error {
-		_ = c.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
-		return nil
-	})
-
-	_ = c.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
-
-	for {
-		mt, msg, err := c.ws.ReadMessage()
-		if err != nil {
-			if !isNormalCloseError(err) {
-				log.Printf("[服务端] 通道 %d 读取错误: %v", c.chID, err)
-			}
-			return
-		}
-
-		_ = c.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
-
-		if mt != websocket.BinaryMessage {
-			continue
-		}
-
-		msgType, connID, meta, payload, err := decodeMessage(msg)
-		if err != nil {
-			log.Printf("[服务端] 通道 %d 解析消息失败: %v", c.chID, err)
-			continue
-		}
-
-		c.pool.handleMessage(c.chID, msgType, connID, meta, payload)
-	}
 }
 
 // ======================== 服务端连接池 ========================
@@ -581,7 +473,7 @@ func (p *ServerPool) forwardTargetToClient(st *ServerConnState) {
 		n, err := st.targetConn.Read(buf)
 		if err != nil {
 			// 检查是否是连接被其他 goroutine 关闭（正常情况）
-			if err != io.EOF && !isClosedConnectionError(err) {
+			if err != io.EOF && !isNormalCloseError(err) {
 				log.Printf("[服务端] 读取目标错误 %s: %v", st.target, err)
 			}
 			return
@@ -776,17 +668,4 @@ func (p *ServerPool) forwardUDPToClient(st *ServerConnState) {
 	}
 }
 
-// isClosedConnectionError 检查是否是连接被关闭的错误（正常情况）
-func isClosedConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "use of closed network connection") ||
-		strings.Contains(errStr, "connection reset by peer") ||
-		strings.Contains(errStr, "tls: bad record MAC") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "websocket: close sent") ||
-		strings.Contains(errStr, "EOF")
-}
+

@@ -44,7 +44,9 @@ func isNormalCloseError(err error) bool {
 		containsString(errStr, "use of closed network connection") ||
 		containsString(errStr, "connection reset by peer") ||
 		containsString(errStr, "broken pipe") ||
-		containsString(errStr, "connection refused")
+		containsString(errStr, "connection refused") ||
+		containsString(errStr, "websocket: close sent") ||
+		containsString(errStr, "EOF")
 }
 
 // containsString 简单的字符串包含检查（避免导入 strings）
