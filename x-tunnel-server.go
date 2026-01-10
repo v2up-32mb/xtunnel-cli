@@ -8,9 +8,21 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// ServerConfig 服务端配置
+var serverCfg = struct {
+	WSReadTimeout  time.Duration
+	PingInterval   time.Duration
+	WSWriteTimeout time.Duration
+}{
+	WSReadTimeout:  15 * time.Second,
+	PingInterval:   5 * time.Second,
+	WSWriteTimeout: 5 * time.Second,
+}
 
 var (
 	listenAddr string

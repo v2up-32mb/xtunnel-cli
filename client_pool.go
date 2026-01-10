@@ -677,12 +677,12 @@ func (p *ECHPool) cleanupChannel(chID int) {
 // handleChannel 处理通道消息
 func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 		return nil
 	})
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 	conn.SetPingHandler(func(m string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 		return p.asyncWriteDirect(chID, websocket.PongMessage, []byte(m))
 	})
 
@@ -697,7 +697,7 @@ func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 			return
 		}
 		// 每次成功读取消息后重置读超时
-		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 
 		if mt != websocket.BinaryMessage {
 			continue
