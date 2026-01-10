@@ -51,9 +51,10 @@ type ECHPool struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	wsConnsMu   sync.RWMutex
-	wsConns     []*websocket.Conn
-	writeQueues []chan WriteJob
+	wsConnsMu       sync.RWMutex
+	wsConns         []*websocket.Conn
+	writeQueues     []chan WriteJob
+	connsWriteMutex []sync.Mutex
 
 	mu    sync.RWMutex
 	conns map[string]*ClientConnState
@@ -73,6 +74,7 @@ func NewECHPool(addr string, n int, _ []string, clientID string) *ECHPool {
 		cancel:           cancel,
 		wsConns:          make([]*websocket.Conn, n),
 		writeQueues:      make([]chan WriteJob, n),
+		connsWriteMutex:  make([]sync.Mutex, n),
 		conns:            make(map[string]*ClientConnState),
 		globalQueueLimit: 0,
 		relayManager:     NewRelayNodeManager(), // 初始化中转节点管理器
@@ -114,6 +116,8 @@ func (p *ECHPool) Start() {
 			newQueues[i] = make(chan WriteJob, 4096)
 		}
 		p.writeQueues = newQueues
+
+		p.connsWriteMutex = make([]sync.Mutex, total)
 
 		// 为每个最优节点建立 connectionNum 条连接
 		for nodeIdx, node := range bestNodes {
@@ -157,16 +161,18 @@ func (p *ECHPool) Shutdown() {
 	for i, ws := range p.wsConns {
 		if ws != nil {
 			wg.Add(1)
-			go func(conn *websocket.Conn, chID int) {
+			go func(conn *websocket.Conn, chID int, id int) {
 				defer wg.Done()
+				p.connsWriteMutex[id].Lock()
 				// 发送正常的关闭帧
 				_ = conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+				p.connsWriteMutex[id].Unlock()
 				// 等待对方响应或超时
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 				_ = conn.Close()
 				log.Printf("[客户端] 通道 %d 已关闭", chID)
-			}(ws, i+1)
+			}(ws, i+1, i)
 			p.wsConns[i] = nil
 		}
 	}
@@ -212,10 +218,9 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
 
-		ctx, cancel := context.WithCancel(p.ctx)
-		go p.writeWorker(ctx, idx, wsConn)
+		go p.writeWorker(p.ctx, idx, wsConn)
 		p.handleChannel(chID, wsConn)
-		cancel()
+
 		_ = wsConn.Close()
 
 		p.wsConnsMu.Lock()
@@ -263,18 +268,22 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 				return
 			case j, ok := <-queue:
 				if !ok {
-					// 队列已关闭
+					// 队列已关闭，正常退出
 					return
 				}
 				job = j
 			case <-ticker.C:
+				p.connsWriteMutex[id].Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 					log.Printf("[客户端] 通道 %d ping发送失败: %v", id+1, err)
-					_ = conn.SetWriteDeadline(time.Time{})
-					continue
+					p.connsWriteMutex[id].Unlock()
+					_ = conn.Close()
+					return
 				}
 				_ = conn.SetWriteDeadline(time.Time{})
+				p.connsWriteMutex[id].Unlock()
+				continue
 			}
 		}
 
@@ -282,24 +291,30 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 
 		// 非二进制消息直接写
 		if job.msgType != websocket.BinaryMessage {
+			p.connsWriteMutex[id].Lock()
 			_ = conn.SetWriteDeadline(time.Now().Add(cfg.WSWriteTimeout))
 			if err := conn.WriteMessage(job.msgType, job.data); err != nil {
+				p.connsWriteMutex[id].Unlock()
 				_ = conn.Close()
 				return
 			}
 			_ = conn.SetWriteDeadline(time.Time{})
+			p.connsWriteMutex[id].Unlock()
 			continue
 		}
 
 		// TCPData 聚合：减少帧数
 		t, connID, meta, payload, err := decodeMessage(job.data)
 		if err != nil || t != MsgTCPData {
+			p.connsWriteMutex[id].Lock()
 			_ = conn.SetWriteDeadline(time.Now().Add(cfg.WSWriteTimeout))
 			if err := conn.WriteMessage(job.msgType, job.data); err != nil {
+				p.connsWriteMutex[id].Unlock()
 				_ = conn.Close()
 				return
 			}
 			_ = conn.SetWriteDeadline(time.Time{})
+			p.connsWriteMutex[id].Unlock()
 			continue
 		}
 
@@ -311,7 +326,7 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 			select {
 			case next, ok := <-queue:
 				if !ok {
-					// 队列已关闭
+					// 队列已关闭，正常退出
 					goto writeAgg
 				}
 				atomic.AddInt64(&p.globalQueueBytes, int64(-next.size))
@@ -348,12 +363,15 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 			}
 		}
 
+		p.connsWriteMutex[id].Lock()
 		_ = conn.SetWriteDeadline(time.Now().Add(cfg.WSWriteTimeout))
 		if err := conn.WriteMessage(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, meta, merged)); err != nil {
+			p.connsWriteMutex[id].Unlock()
 			_ = conn.Close()
 			return
 		}
 		_ = conn.SetWriteDeadline(time.Time{})
+		p.connsWriteMutex[id].Unlock()
 	}
 }
 
@@ -688,7 +706,8 @@ func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 		if err != nil {
 			log.Printf("[客户端] 通道 %d pong发送失败: %v", chID, err)
 		}
-		return err
+		// pong 发送失败不影响 ping/pong 循环，总是返回 nil
+		return nil
 	})
 
 	for {

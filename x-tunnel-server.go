@@ -40,7 +40,7 @@ var (
 
 func init() {
 	flag.StringVar(&listenAddr, "l", ":8443", "监听地址")
-	flag.StringVar(&token, "t", "", "认证令牌")
+	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
 	flag.StringVar(&certFile, "cert", "", "TLS 证书文件 (不指定则自动生成自签证书)")
 	flag.StringVar(&keyFile, "key", "", "TLS 私钥文件 (不指定则自动生成自签证书)")
 }
