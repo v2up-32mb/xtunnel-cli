@@ -258,10 +258,11 @@ func (p *ServerPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wsConn := &ServerWSConn{
-		ws:       ws,
-		chID:     chID,
-		clientID: clientID,
-		pool:     p,
+		ws:        ws,
+		chID:      chID,
+		clientID:  clientID,
+		pool:      p,
+		writeChan: make(chan writeTask, 1024),
 	}
 
 	// 存储 WebSocket 连接
