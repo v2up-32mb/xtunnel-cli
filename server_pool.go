@@ -71,7 +71,11 @@ func (wsConn *ServerWSConn) readLoop() {
 	wsConn.ws.SetReadDeadline(time.Now().Add(serverCfg.WSReadTimeout))
 	wsConn.ws.SetPingHandler(func(m string) error {
 		wsConn.ws.SetReadDeadline(time.Now().Add(serverCfg.WSReadTimeout))
-		return wsConn.asyncWrite(websocket.PongMessage, []byte(m))
+		err := wsConn.asyncWrite(websocket.PongMessage, []byte(m))
+		if err != nil {
+			log.Printf("[服务端] 通道 %d pong发送失败: %v", wsConn.chID, err)
+		}
+		return err
 	})
 
 	for {
@@ -111,6 +115,7 @@ func (wsConn *ServerWSConn) writeLoop() {
 				return
 			}
 			if err := wsConn.writeDirect(task.msgType, task.data); err != nil {
+				log.Printf("[服务端] 通道 %d 写消息失败: %v", wsConn.chID, err)
 				wsConn.close()
 				return
 			}
