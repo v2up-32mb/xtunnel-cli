@@ -70,7 +70,7 @@ func (wsConn *ServerWSConn) readLoop() {
 	})
 	wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
 	wsConn.ws.SetPingHandler(func(m string) error {
-		wsConn.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
+		wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
 		return wsConn.asyncWrite(websocket.PongMessage, []byte(m))
 	})
 
@@ -86,8 +86,6 @@ func (wsConn *ServerWSConn) readLoop() {
 		}
 		// 每次成功读取消息后重置读超时
 		wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
-
-		wsConn.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 		if mt != websocket.BinaryMessage {
 			continue

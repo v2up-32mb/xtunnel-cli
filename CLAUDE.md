@@ -95,10 +95,10 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 ./x-tunnel-client -l socks5://127.0.0.1:1080 -f wss://server:8443 -token your_token -insecure -n 3
 
 # 客户端（使用中转节点）
-./x-tunnel-client -l socks5://127.0.0.1:1080 -f wss://server:8443 -token your_token -insecure -n 3 -relay 1.1.1.1:443,8.8.8.8:443,relay.example.com:443
+./x-tunnel-client -l socks5://127.0.0.1:1080 -f wss://server:8443 -token your_token -insecure -n 3 -ip 1.1.1.1:443,8.8.8.8:443,relay.example.com:443
 ```
 
-### 3. 中转节点管理器 (Commit: 待定)
+### 3. 中转节点管理器 (Commit: 252c4e0)
 **RelayNodeManager 实现:**
 - 实现中转节点解析，支持多种格式（IP, IP:PORT, 域名, 域名:PORT）
 - DNS 解析获取节点 IP 列表
@@ -109,7 +109,7 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 - 节点选择支持负载均衡
 
 **客户端集成:**
-- 添加 `-relay` 命令行参数支持中转节点配置
+- 添加 `-ip` 命令行参数支持中转节点配置
 - 在 ECHPool 中集成 RelayNodeManager
 - 在连接建立时使用最佳节点
 - 优雅关闭时停止中转节点管理器
