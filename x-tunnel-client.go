@@ -36,8 +36,8 @@ var cfg = GlobalConfig{
 	DialTimeout:        3 * time.Second,
 	WSHandshakeTimeout: 5 * time.Second,
 	WSWriteTimeout:     5 * time.Second,
-	WSReadTimeout:      300 * time.Second, // 5分钟超时
-	PingInterval:       60 * time.Second,  // 1分钟ping一次
+	WSReadTimeout:      15 * time.Second, // 15秒超时
+	PingInterval:       5 * time.Second,  // 5秒ping一次
 	ReconnectDelay:     1 * time.Second,
 	ReadBuf32K:         32 * 1024,
 	ReadBuf64K:         64 * 1024,
