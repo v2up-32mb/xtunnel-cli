@@ -120,7 +120,8 @@ func (wsConn *ServerWSConn) writeLoop() {
 		case <-ticker.C:
 			if err := wsConn.writeDirect(websocket.PingMessage, []byte{}); err != nil {
 				log.Printf("[服务端] 通道 %d ping发送失败: %v", wsConn.chID, err)
-				continue
+				wsConn.close()
+				return
 			}
 		}
 	}
