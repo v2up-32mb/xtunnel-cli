@@ -128,9 +128,9 @@ build_binary() {
     # 源文件列表
     local sources=""
     if [ "$target" = "client" ]; then
-        sources="x-tunnel-client.go ip_strategy.go common.go protocol.go"
+        sources="x-tunnel-client.go client_*.go ip_strategy.go common.go protocol.go relay_manager.go"
     else
-        sources="x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go"
+        sources="x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go server_cert.go"
     fi
 
     # 构建编译命令

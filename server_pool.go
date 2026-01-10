@@ -54,6 +54,144 @@ type ServerWSConn struct {
 	writeChan chan writeTask
 }
 
+func (wsConn *ServerWSConn) start() {
+	go wsConn.writeLoop()
+}
+
+func (wsConn *ServerWSConn) readLoop() {
+	defer func() {
+		if !wsConn.closed {
+			wsConn.close()
+		}
+	}()
+
+	wsConn.ws.SetPongHandler(func(string) error {
+		return wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
+	})
+	wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
+	wsConn.ws.SetPingHandler(func(m string) error {
+		wsConn.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
+		return wsConn.asyncWrite(websocket.PongMessage, []byte(m))
+	})
+
+	for {
+		mt, msg, err := wsConn.ws.ReadMessage()
+		if err != nil {
+			if !isNormalCloseError(err) {
+				log.Printf("[服务端] 通道 %d 读取消息失败: %v", wsConn.chID, err)
+			} else {
+				log.Printf("[服务端] 通道 %d 正常关闭: %v", wsConn.chID, err)
+			}
+			return
+		}
+		// 每次成功读取消息后重置读超时
+		wsConn.ws.SetReadDeadline(time.Now().Add(300 * time.Second))
+
+		wsConn.ws.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+		if mt != websocket.BinaryMessage {
+			continue
+		}
+
+		msgType, connID, meta, payload, err := decodeMessage(msg)
+		if err != nil {
+			continue
+		}
+
+		wsConn.pool.handleMessage(wsConn.chID, msgType, connID, meta, payload)
+	}
+}
+
+func (wsConn *ServerWSConn) writeLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case task, ok := <-wsConn.writeChan:
+			if !ok {
+				return
+			}
+			if err := wsConn.writeDirect(task.msgType, task.data); err != nil {
+				wsConn.close()
+				return
+			}
+		case <-ticker.C:
+			if err := wsConn.writeDirect(websocket.PingMessage, []byte{}); err != nil {
+				log.Printf("[服务端] 通道 %d ping发送失败: %v", wsConn.chID, err)
+				continue
+			}
+		}
+	}
+}
+
+func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
+	wsConn.mu.Lock()
+	if wsConn.closed {
+		wsConn.mu.Unlock()
+		return nil
+	}
+	select {
+	case wsConn.writeChan <- writeTask{msgType: msgType, data: data}:
+		wsConn.mu.Unlock()
+		return nil
+	default:
+		wsConn.mu.Unlock()
+		return fmt.Errorf("写队列满")
+	}
+}
+
+func (wsConn *ServerWSConn) writeDirect(msgType int, data []byte) error {
+	wsConn.mu.Lock()
+	defer wsConn.mu.Unlock()
+
+	if wsConn.closed {
+		return nil
+	}
+
+	if msgType != websocket.BinaryMessage {
+		_ = wsConn.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := wsConn.ws.WriteMessage(msgType, data); err != nil {
+			return err
+		}
+		_ = wsConn.ws.SetWriteDeadline(time.Time{})
+		return nil
+	}
+
+	_ = wsConn.ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := wsConn.ws.WriteMessage(msgType, data); err != nil {
+		return err
+	}
+	_ = wsConn.ws.SetWriteDeadline(time.Time{})
+	return nil
+}
+
+func (wsConn *ServerWSConn) close() {
+	wsConn.mu.Lock()
+	if wsConn.closed {
+		wsConn.mu.Unlock()
+		return
+	}
+	wsConn.closed = true
+	wsConn.mu.Unlock()
+
+	_ = wsConn.ws.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = wsConn.ws.Close()
+
+	// 安全关闭channel
+	if wsConn.writeChan != nil {
+		select {
+		case <-wsConn.writeChan:
+			// channel已经关闭
+		default:
+			close(wsConn.writeChan)
+		}
+	}
+
+	wsConn.pool.cleanupChannel(wsConn.chID)
+}
+
 // ======================== 服务端连接池 ========================
 
 type ServerPool struct {
@@ -215,9 +353,9 @@ func (p *ServerPool) broadcastWrite(msgType int, data []byte) error {
 		return fmt.Errorf("无可用通道")
 	}
 
-	// 同步发送到所有活跃通道，确保所有通道都收到消息
+	// 发送到所有活跃通道，忽略写队列满错误
 	for _, wsConn := range activeConns {
-		wsConn.asyncWrite(msgType, data)
+		_ = wsConn.asyncWrite(msgType, data)
 	}
 	return nil
 }
@@ -231,7 +369,7 @@ func (p *ServerPool) sendToChannel(chID int, msgType int, data []byte) error {
 		return fmt.Errorf("通道 %d 不可用", chID)
 	}
 
-	wsConn.asyncWrite(msgType, data)
+	_ = wsConn.asyncWrite(msgType, data)
 	return nil
 }
 
@@ -266,8 +404,14 @@ func (p *ServerPool) cleanupChannel(chID int) {
 		wsConn.mu.Lock()
 		if !wsConn.closed {
 			wsConn.closed = true
+			// 安全关闭channel
 			if wsConn.writeChan != nil {
-				close(wsConn.writeChan)
+				select {
+				case <-wsConn.writeChan:
+					// channel已经关闭
+				default:
+					close(wsConn.writeChan)
+				}
 			}
 			wsConn.ws.Close()
 		}
@@ -667,5 +811,3 @@ func (p *ServerPool) forwardUDPToClient(st *ServerConnState) {
 		}
 	}
 }
-
-

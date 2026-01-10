@@ -154,9 +154,9 @@ set OUTPUT=bin\xtunnel-%TARGET%-%OS%-%ARCH_NAME%%EXT%
 REM 源文件列表
 set SOURCES=
 if "%TARGET%"=="client" (
-    set SOURCES=x-tunnel-client.go ip_strategy.go common.go protocol.go
+    set SOURCES=x-tunnel-client.go client_*.go ip_strategy.go common.go protocol.go relay_manager.go
 ) else (
-    set SOURCES=x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go
+    set SOURCES=x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go server_cert.go
 )
 
 REM 显示编译信息

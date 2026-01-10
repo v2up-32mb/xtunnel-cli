@@ -1,6 +1,3 @@
-//go:build client
-// +build client
-
 package main
 
 import (
@@ -9,9 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,28 +57,27 @@ type ECHPool struct {
 
 	mu    sync.RWMutex
 	conns map[string]*ClientConnState
+
+	// RelayNodeManager 中转节点管理器
+	relayManager *RelayNodeManager
 }
 
 // NewECHPool 创建客户端连接池
-func NewECHPool(addr string, n int, ips []string, clientID string) *ECHPool {
-	total := n
-	if len(ips) > 0 {
-		total = len(ips) * n
-	}
+func NewECHPool(addr string, n int, _ []string, clientID string) *ECHPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &ECHPool{
 		wsServerAddr:     addr,
 		connectionNum:    n,
-		targetIPs:        ips,
 		clientID:         clientID,
 		ctx:              ctx,
 		cancel:           cancel,
-		wsConns:          make([]*websocket.Conn, total),
-		writeQueues:      make([]chan WriteJob, total),
+		wsConns:          make([]*websocket.Conn, n),
+		writeQueues:      make([]chan WriteJob, n),
 		conns:            make(map[string]*ClientConnState),
 		globalQueueLimit: 0,
+		relayManager:     NewRelayNodeManager(), // 初始化中转节点管理器
 	}
-	for i := 0; i < total; i++ {
+	for i := 0; i < n; i++ {
 		p.writeQueues[i] = make(chan WriteJob, 4096)
 	}
 	p.globalQueueLimit = int64(cfg.ReadBuf64K) * 512
@@ -93,14 +86,48 @@ func NewECHPool(addr string, n int, ips []string, clientID string) *ECHPool {
 
 // Start 启动所有 WebSocket 连接
 func (p *ECHPool) Start() {
-	for i := 0; i < len(p.writeQueues); i++ {
-		ip := ""
-		if len(p.targetIPs) > 0 {
-			if idx := i / p.connectionNum; idx < len(p.targetIPs) {
-				ip = p.targetIPs[idx]
+	// 启动中转节点管理器
+	p.relayManager.Start()
+
+	// 获取最多2个最优节点
+	bestNodes := p.relayManager.SelectBestNodes(2)
+
+	if len(bestNodes) > 0 {
+		var nodeIPs []string
+		for _, node := range bestNodes {
+			nodeIPs = append(nodeIPs, node.IP)
+			latency := node.Latency.Milliseconds()
+			log.Printf("[客户端] 最优中转节点: %s (评分: %.2f, 延迟: %dms)", node.IP, node.Score, latency)
+		}
+		log.Printf("[客户端] 使用 %d 个最优中转节点，每个节点建立 %d 条连接", len(bestNodes), p.connectionNum)
+		log.Printf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.connectionNum)
+
+		// 根据最优节点数量重新分配连接池
+		total := len(bestNodes) * p.connectionNum
+		p.wsConnsMu.Lock()
+		p.wsConns = make([]*websocket.Conn, total)
+		p.wsConnsMu.Unlock()
+
+		// 重新分配写队列
+		newQueues := make([]chan WriteJob, total)
+		for i := 0; i < total; i++ {
+			newQueues[i] = make(chan WriteJob, 4096)
+		}
+		p.writeQueues = newQueues
+
+		// 为每个最优节点建立 connectionNum 条连接
+		for nodeIdx, node := range bestNodes {
+			for j := 0; j < p.connectionNum; j++ {
+				chIdx := nodeIdx*p.connectionNum + j
+				go p.dialAndServe(chIdx, node.IP)
 			}
 		}
-		go p.dialAndServe(i, ip)
+	} else {
+		// 没有中转节点，使用原有逻辑
+		log.Printf("[客户端] 未使用中转节点，建立 %d 条连接", p.connectionNum)
+		for i := 0; i < len(p.writeQueues); i++ {
+			go p.dialAndServe(i, "")
+		}
 	}
 }
 
@@ -108,10 +135,13 @@ func (p *ECHPool) Start() {
 func (p *ECHPool) Shutdown() {
 	log.Printf("[客户端] 正在关闭所有连接...")
 
-	// 1. 取消 context，通知所有 goroutine 退出
+	// 1. 停止中转节点管理器
+	p.relayManager.Stop()
+
+	// 2. 取消 context，通知所有 goroutine 退出
 	p.cancel()
 
-	// 2. 关闭所有写队列，停止写入
+	// 3. 关闭所有写队列，停止写入
 	for i, q := range p.writeQueues {
 		if q != nil {
 			close(q)
@@ -119,7 +149,7 @@ func (p *ECHPool) Shutdown() {
 		}
 	}
 
-	// 3. 优雅关闭所有 WebSocket 连接
+	// 4. 优雅关闭所有 WebSocket 连接
 	p.wsConnsMu.Lock()
 	defer p.wsConnsMu.Unlock()
 
@@ -238,12 +268,13 @@ func (p *ECHPool) writeWorker(ctx context.Context, id int, conn *websocket.Conn)
 				}
 				job = j
 			case <-ticker.C:
-				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-					_ = conn.Close()
-					return
+					log.Printf("[客户端] 通道 %d ping发送失败: %v", id+1, err)
+					_ = conn.SetWriteDeadline(time.Time{})
+					continue
 				}
-				continue
+				_ = conn.SetWriteDeadline(time.Time{})
 			}
 		}
 
@@ -659,10 +690,13 @@ func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 		mt, msg, err := conn.ReadMessage()
 		if err != nil {
 			if !isNormalCloseError(err) {
-				log.Printf("[客户端] 通道 %d 异常: %v", chID, err)
+				log.Printf("[客户端] 通道 %d 读取消息失败: %v", chID, err)
+			} else {
+				log.Printf("[客户端] 通道 %d 正常关闭: %v", chID, err)
 			}
 			return
 		}
+		// 每次成功读取消息后重置读超时
 		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 
 		if mt != websocket.BinaryMessage {

@@ -111,9 +111,9 @@ function Build-Binary {
 
     # 源文件列表
     if ($target -eq "client") {
-        $sources = "x-tunnel-client.go ip_strategy.go common.go protocol.go"
+        $sources = "x-tunnel-client.go client_*.go ip_strategy.go common.go protocol.go relay_manager.go"
     } else {
-        $sources = "x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go"
+        $sources = "x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go server_cert.go"
     }
 
     # 显示编译信息
