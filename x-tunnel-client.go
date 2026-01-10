@@ -5,15 +5,14 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,8 +36,8 @@ var cfg = GlobalConfig{
 	DialTimeout:        3 * time.Second,
 	WSHandshakeTimeout: 5 * time.Second,
 	WSWriteTimeout:     5 * time.Second,
-	WSReadTimeout:      10 * time.Second,
-	PingInterval:       3 * time.Second,
+	WSReadTimeout:      300 * time.Second, // 5分钟超时
+	PingInterval:       60 * time.Second,  // 1分钟ping一次
 	ReconnectDelay:     1 * time.Second,
 	ReadBuf32K:         32 * 1024,
 	ReadBuf64K:         64 * 1024,
@@ -77,7 +76,7 @@ var (
 func init() {
 	flag.StringVar(&listenAddr, "l", "", "监听地址 (仅支持 socks5://，支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080")
 	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式，必须是 wss://host:port/path)")
-	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（将 wss 主机名定向到该 IP 连接），多个IP用逗号分隔")
+	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式：IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT），多个节点用逗号分隔")
 	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表，逗号分隔，如 443,8443")
 	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
 	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
@@ -89,7 +88,9 @@ func init() {
 }
 
 func main() {
+	log.Printf("[客户端] 程序启动")
 	flag.Parse()
+	log.Printf("[客户端] 参数解析完成")
 
 	if listenAddr == "" || forwardAddr == "" {
 		flag.Usage()
@@ -113,13 +114,10 @@ func main() {
 		log.Printf("[客户端] IP 访问策略: %s (code: %d)", ips, ipStrategy)
 	}
 
-	var targetIPs []string
-	if ipAddr != "" {
-		for _, p := range strings.Split(ipAddr, ",") {
-			trimmed := strings.TrimSpace(p)
-			if trimmed != "" {
-				targetIPs = append(targetIPs, trimmed)
-			}
+	defaultPort := "443"
+	if u, err := url.Parse(forwardAddr); err == nil {
+		if _, port, err := net.SplitHostPort(u.Host); err == nil {
+			defaultPort = port
 		}
 	}
 
@@ -158,7 +156,31 @@ func main() {
 	clientID = uuid.NewString()
 	log.Printf("[客户端] 客户端ID: %s", clientID)
 
-	echPool = NewECHPool(forwardAddr, connectionNum, targetIPs, clientID)
+	echPool = NewECHPool(forwardAddr, connectionNum, nil, clientID)
+
+	if ipAddr != "" {
+		for _, addr := range strings.Split(ipAddr, ",") {
+			trimmed := strings.TrimSpace(addr)
+			if trimmed == "" {
+				continue
+			}
+			addedIPs, err := echPool.relayManager.AddNodeAndTest(trimmed, defaultPort)
+			if err != nil {
+				log.Printf("[客户端] 添加中转节点 %s 失败: %v", trimmed, err)
+			} else {
+				for _, ip := range addedIPs {
+					node := echPool.relayManager.GetNodeByIP(ip)
+					if node != nil {
+						latency := node.Latency.Milliseconds()
+						log.Printf("[客户端] 中转节点: %s 已添加, 连接延迟: %dms", ip, latency)
+					} else {
+						log.Printf("[客户端] 中转节点: %s 已添加", ip)
+					}
+				}
+			}
+		}
+	}
+
 	echPool.Start()
 
 	// 监听退出信号

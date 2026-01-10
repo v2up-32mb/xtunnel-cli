@@ -8,7 +8,6 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -84,5 +83,3 @@ func main() {
 		log.Fatal("[服务端]", err)
 	}
 }
-
-

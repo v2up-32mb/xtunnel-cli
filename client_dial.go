@@ -4,9 +4,7 @@
 package main
 
 import (
-	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -60,6 +58,12 @@ func dialWebSocketWithECH(addr string, retries int, ip string, clientID string, 
 		if ip != "" {
 			dialer.NetDial = func(network, address string) (net.Conn, error) {
 				_, port, _ := net.SplitHostPort(address)
+				// 检查 ip 是否已经包含端口
+				if _, _, err := net.SplitHostPort(ip); err == nil {
+					// ip 已经包含端口，直接使用
+					return net.DialTimeout(network, ip, cfg.DialTimeout)
+				}
+				// ip 不包含端口，使用 JoinHostPort
 				return net.DialTimeout(network, net.JoinHostPort(ip, port), cfg.DialTimeout)
 			}
 		}
