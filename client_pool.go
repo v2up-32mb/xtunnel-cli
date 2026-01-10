@@ -381,6 +381,7 @@ func (p *ECHPool) asyncWriteDirect(chID int, msgType int, data []byte) error {
 			return nil
 		case <-timer.C:
 			atomic.AddInt64(&p.globalQueueBytes, -size)
+			log.Printf("[客户端] 通道 %d 写队列满，队列长度: %d", chID, len(p.writeQueues[idx]))
 			return fmt.Errorf("通道 %d 缓冲区拥堵", chID)
 		}
 	}
@@ -683,7 +684,11 @@ func (p *ECHPool) handleChannel(chID int, conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
 	conn.SetPingHandler(func(m string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSReadTimeout))
-		return p.asyncWriteDirect(chID, websocket.PongMessage, []byte(m))
+		err := p.asyncWriteDirect(chID, websocket.PongMessage, []byte(m))
+		if err != nil {
+			log.Printf("[客户端] 通道 %d pong发送失败: %v", chID, err)
+		}
+		return err
 	})
 
 	for {
