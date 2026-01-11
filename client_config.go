@@ -57,6 +57,9 @@ var cfg = &GlobalConfig{
 	UDPBlockPorts:      nil,
 }
 
+// fallback 全局变量，用于指示是否使用Fallback模式 (Windows 7兼容性设置)
+var fallback = true
+
 // 缓冲区池（减少内存分配）
 var buf32kPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
 var buf64kPool = sync.Pool{New: func() any { b := make([]byte, 64*1024); return &b }}

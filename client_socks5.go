@@ -196,7 +196,7 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 	}
 
 	// 注册连接并广播连接请求
-	clientPool.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
+	echPool.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
 
 	// 从连接池获取缓冲区
 	bufPtr := buf32kPool.Get().(*[]byte)
@@ -205,13 +205,13 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 
 	defer func() {
 		// 发送关闭消息
-		if chID, ok := clientPool.GetUplinkChannel(connID); ok {
-			_ = clientPool.SendCloseDirect(chID, connID)
+		if chID, ok := echPool.GetUplinkChannel(connID); ok {
+			_ = echPool.SendCloseDirect(chID, connID)
 		} else {
-			clientPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPClose, connID, nil, nil))
+			echPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPClose, connID, nil, nil))
 		}
 		_ = c.Close()
-		clientPool.Unregister(connID)
+		echPool.Unregister(connID)
 	}()
 
 	// 数据转发循环
@@ -221,14 +221,14 @@ func handleSOCKS5Connect(c net.Conn, target string) {
 			return
 		}
 		// 如果上行通道已确定，使用单播；否则使用广播
-		if chID, ok := clientPool.GetUplinkChannel(connID); ok {
-			if err := clientPool.SendDataDirect(chID, connID, buf[:n]); err != nil {
+		if chID, ok := echPool.GetUplinkChannel(connID); ok {
+			if err := echPool.SendDataDirect(chID, connID, buf[:n]); err != nil {
 				log.Printf("[客户端] 发送数据失败: %v, ID:%s", err, shortID(connID))
 				return
 			}
 		} else {
 			// uplink 还未确定，使用广播发送
-			clientPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, buf[:n]))
+			echPool.broadcastWrite(websocket.BinaryMessage, encodeMessage(MsgTCPData, connID, nil, buf[:n]))
 		}
 	}
 }
@@ -267,11 +267,11 @@ func handleSOCKS5UDP(c net.Conn, cfgp *ProxyConfig) {
 		connID:      connID,
 		tcpConn:     c,
 		udpListener: ul,
-		pool:        clientPool,
+		pool:        echPool,
 		done:        make(chan bool, 5),
 		channelID:   -1,
 	}
-	clientPool.RegisterUDP(connID, assoc)
+	echPool.RegisterUDP(connID, assoc)
 
 	// 启动 UDP 接收循环
 	go assoc.loop()
