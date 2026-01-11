@@ -334,3 +334,66 @@ func (m *RelayNodeManager) Stop() {
 		m.testTimer.Stop()
 	}
 }
+
+// GetHealthyRelayIPs 获取当前健康的中转节点IP列表（评分>30且成功率>0）
+func (m *RelayNodeManager) GetHealthyRelayIPs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var healthyIPs []string
+	for _, node := range m.nodes {
+		if node.Score > 30.0 && node.SuccessRate > 0.0 {
+			healthyIPs = append(healthyIPs, node.IP)
+		}
+	}
+	return healthyIPs
+}
+
+// SelectNodeExcluding 申请1个新节点，排除指定的IP列表
+func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.nodes) == 0 {
+		return nil
+	}
+
+	// 创建排除集合
+	excludeMap := make(map[string]bool)
+	for _, ip := range excludeIPs {
+		excludeMap[ip] = true
+	}
+
+	// 按评分排序，排除已使用的IP
+	var candidates []*RelayNode
+	for _, node := range m.nodes {
+		if !excludeMap[node.IP] && node.SuccessRate > 0.0 {
+			candidates = append(candidates, node)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 按评分排序
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+
+	return candidates[0]
+}
+
+// GetAvailableHealthyCount 获取可用健康节点数量（评分>30且成功率>0）
+func (m *RelayNodeManager) GetAvailableHealthyCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	count := 0
+	for _, node := range m.nodes {
+		if node.Score > 30.0 && node.SuccessRate > 0.0 {
+			count++
+		}
+	}
+	return count
+}
