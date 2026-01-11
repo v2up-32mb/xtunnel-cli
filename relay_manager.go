@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -117,14 +118,15 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 			Score:   50.0,
 		}
 		if err := m.TestNodeSpeed(node); err != nil {
+			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表，等待后台测速)", addr, err)
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
 		} else {
 			node.SuccessRate = 1.0
+			addedIPs = append(addedIPs, node.IP)
 		}
 		node.LastTest = time.Now()
 		node.Score = node.CalculateScore()
-		addedIPs = append(addedIPs, node.IP)
 
 		m.mu.Lock()
 		m.nodes = append(m.nodes, node)
@@ -136,6 +138,8 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 	if err != nil {
 		return nil, err
 	}
+
+	log.Printf("[中转节点] 域名 %s 解析到 %d 个IP地址", host, len(addrs))
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,19 +153,20 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 		}
 		node := &RelayNode{
 			ID:      addr,
-			Address: address,
+			Address: addr,
 			IP:      addr,
 			Score:   50.0,
 		}
 		if err := m.TestNodeSpeed(node); err != nil {
+			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表，等待后台测速)", addr, err)
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
 		} else {
 			node.SuccessRate = 1.0
+			addedIPs = append(addedIPs, node.IP)
 		}
 		node.LastTest = time.Now()
 		node.Score = node.CalculateScore()
-		addedIPs = append(addedIPs, node.IP)
 		m.nodes = append(m.nodes, node)
 	}
 	return addedIPs, nil

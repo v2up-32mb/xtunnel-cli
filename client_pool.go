@@ -61,6 +61,9 @@ type ECHPool struct {
 
 	// RelayNodeManager 中转节点管理器
 	relayManager *RelayNodeManager
+
+	// 初始化时指定的中转地址数量
+	relayCount int
 }
 
 // NewECHPool 创建客户端连接池
@@ -87,51 +90,61 @@ func NewECHPool(addr string, n int, _ []string, clientID string) *ECHPool {
 }
 
 // Start 启动所有 WebSocket 连接
-func (p *ECHPool) Start() {
+func (p *ECHPool) Start(relayAddresses []string) {
 	// 启动中转节点管理器
 	p.relayManager.Start()
 
-	// 获取最多2个最优节点
-	bestNodes := p.relayManager.SelectBestNodes(2)
+	// 保存中转地址数量，用于后续按需申请节点
+	p.relayCount = len(relayAddresses)
 
-	if len(bestNodes) > 0 {
-		var nodeIPs []string
-		for _, node := range bestNodes {
-			nodeIPs = append(nodeIPs, node.IP)
-			latency := node.Latency.Milliseconds()
-			log.Printf("[客户端] 最优中转节点: %s (评分: %.2f, 延迟: %dms)", node.IP, node.Score, latency)
-		}
-		log.Printf("[客户端] 使用 %d 个最优中转节点，每个节点建立 %d 条连接", len(bestNodes), p.connectionNum)
-		log.Printf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.connectionNum)
+	if p.relayCount > 0 {
+		// 初始化时按约定申请指定个数的中转节点
+		log.Printf("[客户端] 初始化：按约定申请 %d 个中转节点（-ip指定了%d个地址）", p.relayCount, p.relayCount)
+		bestNodes := p.relayManager.SelectBestNodes(p.relayCount)
 
-		// 根据最优节点数量重新分配连接池
-		total := len(bestNodes) * p.connectionNum
-		p.wsConnsMu.Lock()
-		p.wsConns = make([]*websocket.Conn, total)
-		p.wsConnsMu.Unlock()
-
-		// 重新分配写队列
-		newQueues := make([]chan WriteJob, total)
-		for i := 0; i < total; i++ {
-			newQueues[i] = make(chan WriteJob, 4096)
-		}
-		p.writeQueues = newQueues
-
-		p.connsWriteMutex = make([]sync.Mutex, total)
-
-		// 为每个最优节点建立 connectionNum 条连接
-		for nodeIdx, node := range bestNodes {
-			for j := 0; j < p.connectionNum; j++ {
-				chIdx := nodeIdx*p.connectionNum + j
-				go p.dialAndServe(chIdx, node.IP)
+		if len(bestNodes) > 0 {
+			// 使用申请到的节点建立连接
+			log.Printf("[客户端] 初始化成功申请到 %d 个中转节点", len(bestNodes))
+			for _, node := range bestNodes {
+				latency := node.Latency.Milliseconds()
+				log.Printf("[客户端] 中转节点: %s (评分: %.2f, 延迟: %dms)", node.IP, node.Score, latency)
 			}
+			log.Printf("[客户端] 每个节点建立 %d 条连接", p.connectionNum)
+			log.Printf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.connectionNum)
+
+			// 根据申请到的节点数量重新分配连接池
+			total := len(bestNodes) * p.connectionNum
+			p.wsConnsMu.Lock()
+			p.wsConns = make([]*websocket.Conn, total)
+			p.wsConnsMu.Unlock()
+
+			// 重新分配写队列
+			newQueues := make([]chan WriteJob, total)
+			for i := 0; i < total; i++ {
+				newQueues[i] = make(chan WriteJob, 4096)
+			}
+			p.writeQueues = newQueues
+
+			p.connsWriteMutex = make([]sync.Mutex, total)
+
+			// 为每个申请到的节点建立 connectionNum 条连接
+			for nodeIdx, node := range bestNodes {
+				for j := 0; j < p.connectionNum; j++ {
+					chIdx := nodeIdx*p.connectionNum + j
+					go p.dialAndServe(chIdx, node.IP)
+				}
+			}
+			return
 		}
-	} else {
-		// 没有中转节点，使用原有逻辑
-		log.Printf("[客户端] 未使用中转节点，建立 %d 条连接", p.connectionNum)
-		for i := 0; i < len(p.writeQueues); i++ {
-			go p.dialAndServe(i, "")
-		}
+
+		// 如果所有节点初始测速都失败
+		log.Printf("[客户端] 所有中转节点初始测速失败，直连服务端，建立 %d 条连接", p.connectionNum)
+	}
+
+	// 没有指定中转节点或所有节点不可用，直连服务端
+	log.Printf("[客户端] 未使用中转节点，直连服务端，建立 %d 条连接", p.connectionNum)
+	for i := 0; i < p.connectionNum; i++ {
+		go p.dialAndServe(i, "")
 	}
 }
 
@@ -193,6 +206,7 @@ func (p *ECHPool) chIndex(chID int) (int, error) {
 // dialAndServe 连接并服务 WebSocket
 func (p *ECHPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
+	var relayInfo string
 	for {
 		// 检查是否需要退出
 		select {
@@ -204,7 +218,11 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 
 		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID, chID)
 		if err != nil {
-			log.Printf("[客户端] 通道 %d (IP:%s) 连接失败: %v", chID, ip, err)
+			relayInfo := ""
+			if ip != "" {
+				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
+			}
+			log.Printf("[客户端] 通道 %d%s 连接失败: %v", chID, relayInfo, err)
 			// 检查是否需要退出（避免在重连延迟时阻塞）
 			select {
 			case <-p.ctx.Done():
@@ -213,7 +231,11 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 				continue
 			}
 		}
-		log.Printf("[客户端] 通道 %d 已连接", chID)
+		relayInfo = ""
+		if ip != "" {
+			relayInfo = fmt.Sprintf(" [中转: %s]", ip)
+		}
+		log.Printf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
@@ -228,7 +250,7 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 		p.wsConnsMu.Unlock()
 		p.cleanupChannel(chID)
 
-		log.Printf("[客户端] 通道 %d 断开，重连中...", chID)
+		log.Printf("[客户端] 通道 %d%s 断开，重连中...", chID, relayInfo)
 		time.Sleep(cfg.ReconnectDelay)
 	}
 }
