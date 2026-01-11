@@ -158,12 +158,14 @@ func main() {
 
 	echPool = NewECHPool(forwardAddr, connectionNum, nil, clientID)
 
+	var relayAddresses []string
 	if ipAddr != "" {
 		for _, addr := range strings.Split(ipAddr, ",") {
 			trimmed := strings.TrimSpace(addr)
 			if trimmed == "" {
 				continue
 			}
+			relayAddresses = append(relayAddresses, trimmed)
 			addedIPs, err := echPool.relayManager.AddNodeAndTest(trimmed, defaultPort)
 			if err != nil {
 				log.Printf("[客户端] 添加中转节点 %s 失败: %v", trimmed, err)
@@ -181,7 +183,7 @@ func main() {
 		}
 	}
 
-	echPool.Start()
+	echPool.Start(relayAddresses)
 
 	// 监听退出信号
 	sigChan := make(chan os.Signal, 1)
