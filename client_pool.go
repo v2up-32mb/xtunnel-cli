@@ -207,6 +207,7 @@ func (p *ECHPool) chIndex(chID int) (int, error) {
 func (p *ECHPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
 	var relayInfo string
+	var lastIP string
 	for {
 		// 检查是否需要退出
 		select {
@@ -216,10 +217,23 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 		default:
 		}
 
+		// 如果有中转节点配置，在重连时申请新节点
+		if p.relayCount > 0 && lastIP != "" {
+			healthyIPs := p.relayManager.GetHealthyRelayIPs()
+			newNode := p.relayManager.SelectNodeExcluding(healthyIPs)
+			if newNode != nil {
+				log.Printf("[客户端] 通道 %d 重连：申请新中转节点 %s (评分: %.2f, 延迟: %dms)",
+					chID, newNode.IP, newNode.Score, newNode.Latency.Milliseconds())
+				ip = newNode.IP
+				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
+			} else {
+				log.Printf("[客户端] 通道 %d 重连：无可用的健康中转节点，使用原有节点", chID)
+			}
+		}
+
 		wsConn, err := dialWebSocketWithECH(p.wsServerAddr, 3, ip, p.clientID, chID)
 		if err != nil {
-			relayInfo := ""
-			if ip != "" {
+			if relayInfo == "" && ip != "" {
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			}
 			log.Printf("[客户端] 通道 %d%s 连接失败: %v", chID, relayInfo, err)
@@ -231,9 +245,10 @@ func (p *ECHPool) dialAndServe(idx int, ip string) {
 				continue
 			}
 		}
-		relayInfo = ""
+
 		if ip != "" {
 			relayInfo = fmt.Sprintf(" [中转: %s]", ip)
+			lastIP = ip
 		}
 		log.Printf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
 		p.wsConnsMu.Lock()
