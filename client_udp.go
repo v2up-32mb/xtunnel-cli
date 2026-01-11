@@ -25,17 +25,17 @@ import (
 
 // UDPAssociation UDP 关联
 type UDPAssociation struct {
-	connID        string           // 连接唯一标识
-	tcpConn       net.Conn         // TCP 控制连接
-	udpListener   *net.UDPConn     // UDP 监听 socket
-	clientUDPAddr *net.UDPAddr     // 客户端 UDP 地址
-	pool          *ClientPool      // 连接池引用
+	connID        string       // 连接唯一标识
+	tcpConn       net.Conn     // TCP 控制连接
+	udpListener   *net.UDPConn // UDP 监听 socket
+	clientUDPAddr *net.UDPAddr // 客户端 UDP 地址
+	pool          *ECHPool     // 连接池引用
 
-	mu        sync.Mutex       // 保护以下字段的锁
-	closed    bool             // 是否已关闭
-	done      chan bool        // 完成信号
-	receiving bool             // 是否正在接收
-	channelID int              // 上行通道 ID
+	mu        sync.Mutex // 保护以下字段的锁
+	closed    bool       // 是否已关闭
+	done      chan bool  // 完成信号
+	receiving bool       // 是否正在接收
+	channelID int        // 上行通道 ID
 }
 
 // loop UDP 接收循环

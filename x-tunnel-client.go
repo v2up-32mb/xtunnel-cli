@@ -1,14 +1,16 @@
 //go:build client
+// +build client
 
 package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,43 +18,41 @@ import (
 	"github.com/google/uuid"
 )
 
-var (
-	listenAddr       string        // 监听地址
-	forwardAddr      string        // 服务端转发地址
-	ipAddr           string        // 目标 IP 地址（可选）
-	udpBlockPortsStr string        // UDP 拦截端口列表
-	token            string        // 身份验证令牌
-	insecure         bool          // 跳过证书验证
-	connectionNum    int           // 每个 IP 的连接数
-	ips              string        // IP 策略
+// ======================== 客户端参数 ========================
 
-	clientPool    *ClientPool      // 客户端连接池
-	clientID      string           // 客户端唯一标识
-	udpBlockPorts map[int]struct{} // UDP 拦截端口集合
+var (
+	listenAddr       string
+	forwardAddr      string
+	ipAddr           string
+	udpBlockPortsStr string
+	token            string
+	insecure         bool
+	connectionNum    int
+	ips              string
+
+	// Windows 7 compatible: Removed ECH-related parameters
+
+	echPool *ECHPool
+
+	clientID      string
+	udpBlockPorts map[int]struct{}
+	ipStrategy    byte
 )
 
-// init 注册命令行参数
 func init() {
 	flag.StringVar(&listenAddr, "l", "", "监听地址 (仅支持 socks5://，支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080")
 	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式，必须是 wss://host:port/path)")
-	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（将 wss 主机名定向到该 IP 连接），多个IP用逗号分隔")
+	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式：IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT），多个节点用逗号分隔")
 	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表，逗号分隔，如 443,8443")
-	flag.BoolVar(&insecure, "insecure", false, "wss 模式忽略证书校验")
-	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
+	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验")
 	flag.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
 	flag.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
 }
 
-// main 客户端入口函数
-//
-// 初始化客户端并启动服务：
-// 1. 解析命令行参数
-// 2. 验证配置
-// 3. 创建连接池
-// 4. 启动 SOCKS5 监听器
-// 5. 等待退出信号
 func main() {
+	log.Printf("[客户端] 程序启动")
 	flag.Parse()
+	log.Printf("[客户端] 参数解析完成")
 
 	if listenAddr == "" || forwardAddr == "" {
 		flag.Usage()
@@ -71,66 +71,74 @@ func main() {
 		}
 	}
 
-	// 验证服务端地址
-	forwardURL, err := url.Parse(forwardAddr)
-	if err != nil {
-		log.Fatalf("[客户端] 无效的服务地址: %v", err)
-	}
-	if !strings.EqualFold(forwardURL.Scheme, "wss") {
-		log.Fatalf("[客户端] 安全要求：仅支持 wss:// 协议 (当前: %s)", forwardURL.Scheme)
-	}
-
-	// 解析 IP 策略
-	cfg.IPStrategy = parseIPStrategy(ips)
+	ipStrategy = parseIPStrategy(ips)
 	if ips != "" {
-		log.Printf("[客户端] IP 访问策略: %s (code: %d)", ips, cfg.IPStrategy)
+		log.Printf("[客户端] IP 访问策略: %s (code: %d)", ips, ipStrategy)
 	}
 
-	// 解析目标 IP 列表
-	var targetIPs []string
-	if ipAddr != "" {
-		for _, p := range strings.Split(ipAddr, ",") {
-			trimmed := strings.TrimSpace(p)
-			if trimmed != "" {
-				targetIPs = append(targetIPs, trimmed)
-			}
+	defaultPort := "443"
+	if u, err := url.Parse(forwardAddr); err == nil {
+		if _, port, err := net.SplitHostPort(u.Host); err == nil {
+			defaultPort = port
 		}
 	}
 
-	// 解析 UDP 拦截端口列表
+	cfg.Insecure = insecure
+	cfg.Token = token
+	cfg.IPStrategy = ipStrategy
+
+	cfg.UDPBlockPorts = make(map[int]struct{})
 	if udpBlockPortsStr != "" {
-		cfg.UDPBlockPorts = make(map[int]struct{})
 		for _, p := range strings.Split(udpBlockPortsStr, ",") {
 			pp := strings.TrimSpace(p)
 			if pp == "" {
 				continue
 			}
-			var port int
-			_, _ = fmt.Sscanf(pp, "%d", &port)
-			if port > 0 && port < 65536 {
+			port, err := strconv.Atoi(pp)
+			if err == nil && port > 0 && port < 65536 {
 				cfg.UDPBlockPorts[port] = struct{}{}
 			}
 		}
-		udpBlockPorts = cfg.UDPBlockPorts // 保持向后兼容
 	}
 
-	// 生成客户端 ID
+	log.Printf("[客户端] Windows 7 兼容模式：禁用 ECH，使用标准 TLS 1.3")
+
 	clientID = uuid.NewString()
 	log.Printf("[客户端] 客户端ID: %s", clientID)
 
-	// 设置运行时配置
-	cfg.Insecure = insecure
-	cfg.Token = token
+	echPool = NewECHPool(forwardAddr, connectionNum, nil, clientID)
 
-	// 创建并启动连接池
-	clientPool = NewClientPool(forwardAddr, connectionNum, targetIPs, clientID)
-	clientPool.Start()
+	var relayAddresses []string
+	if ipAddr != "" {
+		for _, addr := range strings.Split(ipAddr, ",") {
+			trimmed := strings.TrimSpace(addr)
+			if trimmed == "" {
+				continue
+			}
+			relayAddresses = append(relayAddresses, trimmed)
+			addedIPs, err := echPool.relayManager.AddNodeAndTest(trimmed, defaultPort)
+			if err != nil {
+				log.Printf("[客户端] 添加中转节点 %s 失败: %v", trimmed, err)
+			} else {
+				for _, ip := range addedIPs {
+					node := echPool.relayManager.GetNodeByIP(ip)
+					if node != nil {
+						latency := node.Latency.Milliseconds()
+						log.Printf("[客户端] 中转节点: %s 已添加, 连接延迟: %dms", ip, latency)
+					} else {
+						log.Printf("[客户端] 中转节点: %s 已添加", ip)
+					}
+				}
+			}
+		}
+	}
+
+	echPool.Start(relayAddresses)
 
 	// 监听退出信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// 启动 SOCKS5 监听器
 	var wg sync.WaitGroup
 	for _, listenerRule := range listeners {
 		rule := strings.TrimSpace(listenerRule)
@@ -154,7 +162,7 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Printf("[客户端] 收到退出信号，正在优雅关闭...")
-		clientPool.Shutdown()
+		echPool.Shutdown()
 		os.Exit(0)
 	case <-done:
 		// 所有监听器已退出
