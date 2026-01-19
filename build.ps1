@@ -111,16 +111,16 @@ function Build-Binary {
 
     # 源文件列表
     if ($target -eq "client") {
-        $sources = "x-tunnel-client.go client_*.go ip_strategy.go common.go protocol.go relay_manager.go"
+        $sources = ".\client\cmd\x-tunnel-client"
     } else {
-        $sources = "x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go server_cert.go"
+        $sources = ".\server\cmd\x-tunnel-server"
     }
 
     # 显示编译信息
     Write-Host -NoNewline "编译: ${target} ${os}/${archName}... "
 
     # 构建编译命令
-    $buildCmd = "go build -tags ${target} -trimpath -ldflags='-s -w' -o ${output} ${sources}"
+    $buildCmd = "go build -trimpath -ldflags='-s -w' -o ${output} ${sources}"
 
     # 显示详细命令
     if ($verbose) {
@@ -130,7 +130,7 @@ function Build-Binary {
 
     # 执行编译
     $outputPath = "$output"
-    $errorOutput = & go build -tags $target -trimpath -ldflags="-s -w" -o $outputPath $sources.Split() 2>&1
+    $errorOutput = & go build -trimpath -ldflags="-s -w" -o $outputPath $sources.Split() 2>&1
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[成功]" -ForegroundColor Green
