@@ -1,13 +1,13 @@
-# 编译生成的二进制文件
-x-tunnel-server
-x-tunnel-client
-x-tunnel-server-*
+# 编译生成的二进制文件（仅根目录）
+/x-tunnel-server
+/x-tunnel-client
+/x-tunnel-server-*
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-bin
+/bin
 
 # Go 编译缓存
 *.o
