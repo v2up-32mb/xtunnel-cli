@@ -154,9 +154,9 @@ set OUTPUT=bin\xtunnel-%TARGET%-%OS%-%ARCH_NAME%%EXT%
 REM 源文件列表
 set SOURCES=
 if "%TARGET%"=="client" (
-    set SOURCES=x-tunnel-client.go client_*.go ip_strategy.go common.go protocol.go relay_manager.go
+    set SOURCES=.\client\cmd\x-tunnel-client
 ) else (
-    set SOURCES=x-tunnel-server.go server_pool.go ip_strategy.go common.go protocol.go server_cert.go
+    set SOURCES=.\server\cmd\x-tunnel-server
 )
 
 REM 显示编译信息
@@ -171,7 +171,7 @@ REM 处理 ARM 架构的特殊情况
 if "%ARCH%"=="arm" set GOARM=7
 
 REM 构建编译命令
-set BUILD_CMD=go build -tags %TARGET% -trimpath -ldflags="-s -w" -o %OUTPUT% %SOURCES%
+set BUILD_CMD=go build -trimpath -ldflags="-s -w" -o %OUTPUT% %SOURCES%
 
 REM 执行编译
 if "%VERBOSE%"=="true" (
