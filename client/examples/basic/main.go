@@ -27,6 +27,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("客户端已启动，SOCKS5 代理监听 127.0.0.1:1080")
+	log.Println("客户端已启动,SOCKS5 代理监听 127.0.0.1:1080")
 	select {}
 }

@@ -118,7 +118,7 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 			Score:   50.0,
 		}
 		if err := m.TestNodeSpeed(node); err != nil {
-			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表，等待后台测速)", addr, err)
+			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", addr, err)
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
 		} else {
@@ -158,7 +158,7 @@ func (m *RelayNodeManager) AddNodeAndTest(address string, defaultPort string) ([
 			Score:   50.0,
 		}
 		if err := m.TestNodeSpeed(node); err != nil {
-			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表，等待后台测速)", addr, err)
+			log.Printf("[中转节点] TCP连接测试失败: %s, 错误: %v (节点已加入列表,等待后台测速)", addr, err)
 			node.Latency = 9999 * time.Second
 			node.SuccessRate = 0.0
 		} else {
@@ -200,7 +200,7 @@ func (node *RelayNode) CalculateScore() float64 {
 
 	baseScore := (1.0-normalizedLatency)*0.7 + node.SuccessRate*0.3
 
-	// 衰减因子：根据最后测试时间衰减评分
+	// 衰减因子:根据最后测试时间衰减评分
 	hoursSinceTest := time.Since(node.LastTest).Hours()
 	decayFactor := 1.0
 	if hoursSinceTest > 1 {
@@ -331,7 +331,7 @@ func (m *RelayNodeManager) GetHealthyRelayIPs() []string {
 	return healthyIPs
 }
 
-// SelectNodeExcluding 申请1个新节点，排除指定的IP列表
+// SelectNodeExcluding 申请1个新节点,排除指定的IP列表
 func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -346,7 +346,7 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
 		excludeMap[ip] = true
 	}
 
-	// 按评分排序，排除已使用的IP
+	// 按评分排序,排除已使用的IP
 	var candidates []*RelayNode
 	for _, node := range m.nodes {
 		if !excludeMap[node.IP] && node.SuccessRate > 0.0 {

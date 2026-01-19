@@ -3,17 +3,17 @@
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**x-tunnel** 是一个基于 WebSocket 的高性能隧道代理系统，支持多通道连接池、SOCKS5 代理、ECH (Encrypted Client Hello) 等功能。
+**x-tunnel** 是一个基于 WebSocket 的高性能隧道代理系统,支持多通道连接池、SOCKS5 代理、ECH (Encrypted Client Hello) 等功能.
 
 ## ✨ 特性
 
-- 🚀 **高性能** - 多通道连接池，充分利用网络带宽
+- 🚀 **高性能** - 多通道连接池,充分利用网络带宽
 - 🔒 **安全加密** - 基于 TLS 1.3 的 WebSocket 连接
 - 🌐 **SOCKS5 代理** - 完整的 SOCKS5 协议支持
 - 🔄 **智能中转** - 支持中转节点自动选择和负载均衡
-- 🎯 **ECH 支持** - 支持 Encrypted Client Hello，增强隐私保护
-- 📊 **跨平台** - 支持 Linux、Windows、macOS，多架构编译
-- 🧩 **易于集成** - 提供 Go 包，便于集成到其他项目
+- 🎯 **ECH 支持** - 支持 Encrypted Client Hello,增强隐私保护
+- 📊 **跨平台** - 支持 Linux、Windows、macOS,多架构编译
+- 🧩 **易于集成** - 提供 Go 包,便于集成到其他项目
 
 ## 📖 架构
 
@@ -35,13 +35,13 @@
 
 ### 核心概念
 
-- **多通道连接池**：客户端可以建立多个 WebSocket 连接，提高吞吐量和可靠性
-- **通道选择机制**：
-  - 初始阶段：客户端广播 TCP 连接请求到所有通道
-  - 上行选择：第一个到达服务端的通道占用连接
-  - 下行选择：客户端选择最快响应的通道作为下行
-  - 数据传输：确定上下行后，使用单播传输数据
-- **中转节点管理**：自动测速并选择最优中转节点
+- **多通道连接池**:客户端可以建立多个 WebSocket 连接,提高吞吐量和可靠性
+- **通道选择机制**:
+  - 初始阶段:客户端广播 TCP 连接请求到所有通道
+  - 上行选择:第一个到达服务端的通道占用连接
+  - 下行选择:客户端选择最快响应的通道作为下行
+  - 数据传输:确定上下行后,使用单播传输数据
+- **中转节点管理**:自动测速并选择最优中转节点
 
 ## 📦 安装
 
@@ -62,11 +62,11 @@ build.bat
 .\build.ps1
 ```
 
-编译后的二进制文件将输出到 `bin/` 目录。
+编译后的二进制文件将输出到 `bin/` 目录.
 
 ### 下载预编译版本
 
-访问 [Releases 页面](https://github.com/imshuai/x-tunnel/releases) 下载对应平台的二进制文件。
+访问 [Releases 页面](https://github.com/imshuai/x-tunnel/releases) 下载对应平台的二进制文件.
 
 ## 🚀 快速开始
 
@@ -95,7 +95,7 @@ curl --socks5 127.0.0.1:1080 https://api.ipify.org
 
 ## 📚 作为库使用
 
-x-tunnel 可以作为 Go 库集成到您的项目中。
+x-tunnel 可以作为 Go 库集成到您的项目中.
 
 ### 导入包
 
@@ -148,7 +148,7 @@ func main() {
         log.Fatal(err)
     }
 
-    log.Println("SOCKS5 代理已启动，监听 127.0.0.1:1080")
+    log.Println("SOCKS5 代理已启动,监听 127.0.0.1:1080")
 
     // 保持运行
     select {}
@@ -209,7 +209,7 @@ func main() {
         log.Fatal(err)
     }
 
-    log.Println("客户端已启动，使用中转节点")
+    log.Println("客户端已启动,使用中转节点")
 
     select {}
 }
@@ -260,7 +260,7 @@ func main() {
     }
     defer s.Shutdown()
 
-    log.Println("服务端已启动，监听 :8443")
+    log.Println("服务端已启动,监听 :8443")
 
     // 保持运行
     select {}
@@ -420,7 +420,7 @@ import "github.com/imshuai/x-tunnel/common"
 
 if err != nil {
     if common.IsNormalCloseError(err) {
-        // 正常的连接关闭，不需要处理
+        // 正常的连接关闭,不需要处理
         log.Println("连接正常关闭")
         return
     }
@@ -457,7 +457,7 @@ if err != nil {
 
 ### IP 策略
 
-x-tunnel 支持 IPv4/IPv6 地址解析策略：
+x-tunnel 支持 IPv4/IPv6 地址解析策略:
 
 ```bash
 # 仅使用 IPv4
@@ -475,7 +475,7 @@ x-tunnel 支持 IPv4/IPv6 地址解析策略：
 
 ### 中转节点
 
-使用中转节点可以绕过网络限制或提高连接质量：
+使用中转节点可以绕过网络限制或提高连接质量:
 
 ```bash
 # 指定多个中转节点
@@ -487,7 +487,7 @@ x-tunnel 支持 IPv4/IPv6 地址解析策略：
   -ip relay1.example.com,relay2.example.com
 ```
 
-中转节点管理器会：
+中转节点管理器会:
 - 定期测速（30 秒间隔）
 - 根据延迟和成功率评分
 - 自动选择最优节点
@@ -532,7 +532,7 @@ x-tunnel/
 
 ### Q: 如何在生产环境部署？
 
-A: 建议使用：
+A: 建议使用:
 1. 正式的 TLS 证书（如 Let's Encrypt）
 2. `-insecure=false` 启用证书验证
 3. 使用 systemd 或其他进程管理器
@@ -541,7 +541,7 @@ A: 建议使用：
 
 ### Q: 连接失败怎么办？
 
-A: 检查：
+A: 检查:
 1. 服务端是否正常运行
 2. Token 是否正确
 3. 防火墙是否开放端口
@@ -550,7 +550,7 @@ A: 检查：
 
 ### Q: 如何提高性能？
 
-A: 可以：
+A: 可以:
 1. 增加并发连接数（`-n` 参数）
 2. 使用中转节点选择最优路径
 3. 启用 ECH 减少握手延迟
@@ -558,12 +558,12 @@ A: 可以：
 
 ### Q: 支持哪些代理协议？
 
-A: 目前支持 SOCKS5（RFC 1928），包括：
+A: 目前支持 SOCKS5（RFC 1928）,包括:
 - CONNECT 命令（TCP）
 - UDP ASSOCIATE
 - 用户名/密码认证
 
-计划支持 HTTP Proxy 协议。
+计划支持 HTTP Proxy 协议.
 
 ## 📄 License
 

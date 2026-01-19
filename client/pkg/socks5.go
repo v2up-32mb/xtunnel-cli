@@ -252,7 +252,7 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 				return
 			}
 		} else {
-			// uplink 还未确定，使用广播发送
+			// uplink 还未确定,使用广播发送
 			p.broadcastWrite(websocket.BinaryMessage, common.EncodeMessage(common.MsgTCPData, connID, nil, buf[:n]))
 		}
 	}

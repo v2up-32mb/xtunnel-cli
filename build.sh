@@ -76,7 +76,7 @@ platforms=(
 # 创建输出目录
 mkdir -p bin
 
-# 如果需要清理，删除旧的二进制文件
+# 如果需要清理,删除旧的二进制文件
 if [ "$CLEAN" = true ]; then
     echo -e "${YELLOW}清理 bin 目录...${NC}"
     rm -f bin/xtunnel-* || true

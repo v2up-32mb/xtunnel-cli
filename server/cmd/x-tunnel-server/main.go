@@ -27,13 +27,13 @@ func main() {
 	}
 	defer s.Shutdown()
 
-	log.Printf("[服务端] 已启动，等待连接...")
+	log.Printf("[服务端] 已启动,等待连接...")
 
 	// 等待信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
-	log.Println("[服务端] 收到退出信号，正在关闭...")
+	log.Println("[服务端] 收到退出信号,正在关闭...")
 }
 
 func init() {

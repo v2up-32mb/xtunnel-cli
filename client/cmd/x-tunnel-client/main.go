@@ -44,20 +44,20 @@ func main() {
 		}()
 	}
 
-	log.Printf("[客户端] 已启动，等待连接...")
+	log.Printf("[客户端] 已启动,等待连接...")
 
 	// 等待信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
-	log.Println("[客户端] 收到退出信号，正在关闭...")
+	log.Println("[客户端] 收到退出信号,正在关闭...")
 }
 
 func init() {
-	flag.StringVar(&listenAddr, "l", "", "监听地址 (仅支持 socks5://，支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080")
-	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式，必须是 wss://host:port/path)")
-	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式：IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT），多个节点用逗号分隔")
-	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表，逗号分隔，如 443,8443")
+	flag.StringVar(&listenAddr, "l", "", "监听地址 (仅支持 socks5://,支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080")
+	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式,必须是 wss://host:port/path)")
+	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式:IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT）,多个节点用逗号分隔")
+	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表,逗号分隔,如 443,8443")
 	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
 	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
 	flag.StringVar(&dnsServer, "dns", "https://doh.pub/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
@@ -119,7 +119,7 @@ func parseFlags() *client.Config {
 		var err error
 		ipStrategy, err = common.ParseIPStrategy(ips)
 		if err != nil {
-			log.Printf("[客户端] IP 策略解析失败: %v，使用默认策略", err)
+			log.Printf("[客户端] IP 策略解析失败: %v,使用默认策略", err)
 		} else {
 			log.Printf("[客户端] IP 访问策略: %s (code: %d)", ips, ipStrategy)
 		}
@@ -130,7 +130,7 @@ func parseFlags() *client.Config {
 	if insecure {
 		if !fallback {
 			fallback = true
-			log.Printf("[客户端] 启用 -insecure：已自动禁用 ECH（fallback）")
+			log.Printf("[客户端] 启用 -insecure:已自动禁用 ECH（fallback）")
 		}
 		enableECH = false
 	}
@@ -176,7 +176,7 @@ func parseListenAddrs() []string {
 			continue
 		}
 		if !strings.HasPrefix(l, "socks5://") {
-			log.Fatalf("[客户端] 仅支持 SOCKS5 监听：非法监听地址 %q", l)
+			log.Fatalf("[客户端] 仅支持 SOCKS5 监听:非法监听地址 %q", l)
 		}
 		listeners = append(listeners, l)
 	}

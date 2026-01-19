@@ -59,7 +59,7 @@ $platforms = @(
 # 创建输出目录
 New-Item -ItemType Directory -Force -Path bin | Out-Null
 
-# 如果需要清理，删除旧的二进制文件
+# 如果需要清理,删除旧的二进制文件
 if ($clean) {
     Write-Host "清理 bin 目录..." -ForegroundColor Yellow
     Remove-Item -Path "bin\xtunnel-*.*" -Force -ErrorAction SilentlyContinue
