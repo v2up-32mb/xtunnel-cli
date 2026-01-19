@@ -1,0 +1,364 @@
+package server
+
+import (
+	"encoding/binary"
+	"io"
+	"log"
+	"net"
+	"time"
+
+	"x-tunnel/common"
+)
+
+// ======================== TCP 处理 ========================
+
+// handleTCPConnect 处理 TCP 连接请求
+func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
+	if len(meta) < 1 {
+		p.sendDownlink(connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
+		return
+	}
+
+	ipStrategy := common.IPStrategy(meta[0])
+	target := string(meta[1:])
+
+	// 第一个到达的通道占用连接，后续的丢弃
+	p.mu.Lock()
+	st, exists := p.conns[connID]
+	if !exists {
+		// 第一个到达的通道：创建状态并占用
+		st = &ServerConnState{
+			connID:     connID,
+			target:     target,
+			uplinkChID: chID,
+			ipStrategy: ipStrategy,
+			isUDP:      false,
+			connected:  false,
+		}
+		p.conns[connID] = st
+		p.mu.Unlock()
+
+		// 获取客户端地址
+		p.mu.RLock()
+		wsConn := p.chConns[chID]
+		p.mu.RUnlock()
+		if wsConn != nil {
+			st.clientID = wsConn.clientID
+			st.clientAddr = wsConn.clientID
+		}
+
+		// 发送 MsgSelectUplink（广播），携带上行通道ID
+		uplinkChIDBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
+		_ = p.sendDownlink(connID, common.MsgSelectUplink, uplinkChIDBytes, nil)
+
+		log.Printf("[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, common.ShortID(connID))
+
+		// 异步连接目标服务器
+		go p.connectTarget(st)
+
+	} else {
+		// 后续通道：丢弃
+		p.mu.Unlock()
+		// 已有其他通道处理此连接，静默丢弃
+	}
+}
+
+// connectTarget 连接目标服务器
+func (p *serverPool) connectTarget(st *ServerConnState) {
+	// IP 策略解析
+	resolvedTarget := common.ResolveWithStrategy(st.target, st.ipStrategy)
+
+	// 连接到目标
+	conn, err := net.DialTimeout("tcp", resolvedTarget, 10*time.Second)
+	if err != nil {
+		log.Printf("[服务端] 连接目标失败 %s: %v", st.target, err)
+		p.sendDownlink(st.connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
+		p.mu.Lock()
+		delete(p.conns, st.connID)
+		p.mu.Unlock()
+		return
+	}
+
+	st.mu.Lock()
+	st.targetConn = conn
+	st.connected = true
+	// 获取并清空缓存数据
+	pending := st.pendingData
+	st.pendingData = nil
+	st.mu.Unlock()
+
+	log.Printf("[服务端] %s 连接目标成功 %s, ID:%s", st.clientAddr, st.target, common.ShortID(st.connID))
+
+	// 发送连接成功（广播）
+	_ = p.sendDownlink(st.connID, common.MsgConnStatus, []byte{byte(common.StatusOK)}, nil)
+
+	// 发送缓存的数据
+	if len(pending) > 0 {
+		for _, data := range pending {
+			if _, err := conn.Write(data); err != nil {
+				log.Printf("[服务端] 写入缓存数据失败 %s: %v", st.target, err)
+				p.unregisterConn(st.connID)
+				return
+			}
+		}
+	}
+
+	// 启动目标→客户端转发
+	go p.forwardTargetToClient(st)
+}
+
+// handleTCPData 处理 TCP 数据
+func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+
+	if st == nil {
+		return
+	}
+
+	st.mu.RLock()
+	targetConn := st.targetConn
+	st.mu.RUnlock()
+
+	if targetConn == nil {
+		// 连接还未建立，缓存数据
+		st.mu.Lock()
+		// 避免重复缓存：如果已经有缓存数据，就不再添加（广播消息可能重复）
+		if st.targetConn == nil && len(st.pendingData) == 0 {
+			st.pendingData = append(st.pendingData, payload)
+		}
+		st.mu.Unlock()
+		return
+	}
+
+	// 只接受来自上行通道的数据，其余通道丢弃
+	st.mu.RLock()
+	uplinkChID := st.uplinkChID
+	st.mu.RUnlock()
+
+	if uplinkChID > 0 && chID != uplinkChID {
+		// 调试日志：需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的数据，但上行通道是 %d, ID:%s，忽略",
+		// 	chID, uplinkChID, common.ShortID(connID))
+		return
+	}
+
+	_, err := targetConn.Write(payload)
+	if err != nil {
+		log.Printf("[服务端] 写入目标失败 %s: %v", st.target, err)
+		p.unregisterConn(connID)
+	}
+}
+
+// handleSelectDownlink 处理选择下行通道
+func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) {
+	// meta 包含客户端选择的下行通道号（4字节，大端序）
+	var downlinkChID int
+	if len(meta) >= 4 {
+		downlinkChID = int(binary.BigEndian.Uint32(meta[0:4]))
+	} else {
+		// 兼容旧版本：使用当前发送消息的通道
+		downlinkChID = chID
+	}
+
+	p.mu.RLock()
+	st := p.conns[connID]
+	wsConn := p.chConns[downlinkChID]
+	p.mu.RUnlock()
+
+	if st == nil {
+		return
+	}
+
+	// 验证下行通道是否仍然活跃
+	if wsConn == nil || wsConn.closed {
+		log.Printf("[服务端] 警告: 客户端尝试选择已关闭的通道 %d 作为下行通道, connID:%s", downlinkChID, common.ShortID(connID))
+		return
+	}
+
+	// 验证消息是否从上行通道发送
+	st.mu.RLock()
+	uplinkChID := st.uplinkChID
+	st.mu.RUnlock()
+
+	if uplinkChID > 0 && chID != uplinkChID {
+		log.Printf("[服务端] 警告: MsgSelectDownlink 来自通道 %d，但上行通道是 %d, ID:%s，忽略",
+			chID, uplinkChID, common.ShortID(connID))
+		return
+	}
+
+	st.mu.Lock()
+	if st.downlinkChID == 0 {
+		st.downlinkChID = downlinkChID
+	} else {
+		// 已经选择过下行通道，但收到另一个选择请求
+		log.Printf("[服务端] 警告: %s 访问: %s, 当前下行通道 %d, 试图改为 %d, ID:%s，忽略",
+			st.clientAddr, st.target, st.downlinkChID, downlinkChID, common.ShortID(connID))
+	}
+	st.mu.Unlock()
+}
+
+// handleTCPClose 处理 TCP 连接关闭
+func (p *serverPool) handleTCPClose(chID int, connID string) {
+	p.unregisterConn(connID)
+}
+
+// forwardTargetToClient 转发目标→客户端数据
+func (p *serverPool) forwardTargetToClient(st *ServerConnState) {
+	defer p.unregisterConn(st.connID)
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := st.targetConn.Read(buf)
+		if err != nil {
+			// 检查是否是连接被其他 goroutine 关闭（正常情况）
+			if err != io.EOF && !common.IsNormalCloseError(err) {
+				log.Printf("[服务端] 读取目标错误 %s: %v", st.target, err)
+			}
+			return
+		}
+
+		if n > 0 {
+			_ = p.sendDownlink(st.connID, common.MsgTCPData, nil, buf[:n])
+		}
+	}
+}
+
+// ======================== UDP 处理 ========================
+
+// handleUDPConnect 处理 UDP 连接请求
+func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
+	if len(meta) < 1 {
+		p.sendDownlink(connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
+		return
+	}
+
+	ipStrategy := common.IPStrategy(meta[0])
+	target := string(meta[1:])
+
+	// 创建 UDP socket
+	udpConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		log.Printf("[服务端] 创建 UDP 失败: %v", err)
+		p.sendDownlink(connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
+		return
+	}
+
+	// 创建连接状态
+	st := &ServerConnState{
+		connID:     connID,
+		target:     target,
+		targetUDP:  udpConn,
+		uplinkChID: chID,
+		ipStrategy: ipStrategy,
+		isUDP:      true,
+		connected:  true,
+	}
+
+	p.mu.Lock()
+	p.conns[connID] = st
+	p.mu.Unlock()
+
+	p.mu.RLock()
+	wsConn := p.chConns[chID]
+	p.mu.RUnlock()
+	if wsConn != nil {
+		st.clientID = wsConn.clientID
+		st.clientAddr = wsConn.clientID
+	}
+
+	// 发送 MsgSelectUplink（广播），携带上行通道ID
+	uplinkChIDBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
+	_ = p.sendDownlink(connID, common.MsgSelectUplink, uplinkChIDBytes, nil)
+
+	log.Printf("[服务端] %s UDP 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, common.ShortID(connID))
+
+	// 启动 UDP 接收
+	go p.forwardUDPToClient(st)
+}
+
+// handleUDPData 处理 UDP 数据
+func (p *serverPool) handleUDPData(chID int, connID string, meta, payload []byte) {
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+
+	if st == nil || st.targetUDP == nil {
+		return
+	}
+
+	// 只接受来自上行通道的数据，其余通道丢弃
+	st.mu.RLock()
+	uplinkChID := st.uplinkChID
+	st.mu.RUnlock()
+
+	if uplinkChID > 0 && chID != uplinkChID {
+		// 调试日志：需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的 UDP 数据，但上行通道是 %d, ID:%s，忽略",
+		// 	chID, uplinkChID, common.ShortID(connID))
+		return
+	}
+
+	// meta 是目标地址字符串
+	targetAddr := string(meta)
+	if targetAddr == "" {
+		targetAddr = st.target
+	}
+
+	// IP 策略解析
+	resolvedTarget := common.ResolveWithStrategy(targetAddr, st.ipStrategy)
+
+	// 解析 UDP 地址
+	udpAddr, err := net.ResolveUDPAddr("udp", resolvedTarget)
+	if err != nil {
+		log.Printf("[服务端] 解析 UDP 地址失败 %s: %v", targetAddr, err)
+		return
+	}
+
+	// 发送 UDP 包
+	_, err = st.targetUDP.WriteToUDP(payload, udpAddr)
+	if err != nil {
+		log.Printf("[服务端] 发送 UDP 失败: %v", err)
+	}
+}
+
+// handleUDPClose 处理 UDP 连接关闭
+func (p *serverPool) handleUDPClose(chID int, connID string) {
+	p.unregisterConn(connID)
+}
+
+// forwardUDPToClient 转发 UDP→客户端数据
+func (p *serverPool) forwardUDPToClient(st *ServerConnState) {
+	buf := make([]byte, 64*1024)
+	// natMap := make(map[string]string) // remoteAddr -> connID for responses
+
+	defer p.unregisterConn(st.connID)
+
+	for {
+		st.mu.RLock()
+		udpConn := st.targetUDP
+		connected := st.connected
+		st.mu.RUnlock()
+
+		if !connected || udpConn == nil {
+			return
+		}
+
+		udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, addr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+
+		if n > 0 {
+			// 构造返回地址
+			replyAddr := addr.String()
+			// natMap[replyAddr] = st.connID
+
+			_ = p.sendDownlink(st.connID, common.MsgUDPData, []byte(replyAddr), buf[:n])
+		}
+	}
+}

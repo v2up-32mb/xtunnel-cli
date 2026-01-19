@@ -1,6 +1,9 @@
 //go:build client || server
 // +build client || server
 
+// Deprecated: 此文件已废弃，请使用 x-tunnel/common 包。
+// 此文件将在 v2.0 版本中移除。
+// 迁移指南：使用 common.IsNormalCloseError() 等函数
 package main
 
 import (

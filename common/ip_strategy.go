@@ -1,36 +1,42 @@
-//go:build client || server
-// +build client || server
-
-// Deprecated: 此文件已废弃，请使用 x-tunnel/common 包。
-// 此文件将在 v2.0 版本中移除。
-// 迁移指南：使用 common.ParseIPStrategy() 等函数
-package main
+// Package common 提供 IP 地址解析策略
+package common
 
 import (
 	"net"
 	"strings"
 )
 
-// parseIPStrategy 解析 IP 策略字符串
-func parseIPStrategy(s string) byte {
+// IPStrategy IP 地址偏好策略
+type IPStrategy byte
+
+const (
+	IPStrategyDefault  IPStrategy = 0
+	IPStrategyIPv4Only IPStrategy = 1
+	IPStrategyIPv6Only IPStrategy = 2
+	IPStrategyPv4Pv6   IPStrategy = 3 // IPv4 优先
+	IPStrategyPv6Pv4   IPStrategy = 4 // IPv6 优先
+)
+
+// ParseIPStrategy 解析 IP 策略字符串
+func ParseIPStrategy(s string) (IPStrategy, error) {
 	s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
 	switch s {
 	case "4":
-		return IPStrategyIPv4Only
+		return IPStrategyIPv4Only, nil
 	case "6":
-		return IPStrategyIPv6Only
+		return IPStrategyIPv6Only, nil
 	case "4,6":
-		return IPStrategyPv4Pv6
+		return IPStrategyPv4Pv6, nil
 	case "6,4":
-		return IPStrategyPv6Pv4
+		return IPStrategyPv6Pv4, nil
 	default:
-		return IPStrategyDefault
+		return IPStrategyDefault, nil
 	}
 }
 
-// resolveWithStrategy 根据 IP 策略解析目标地址
+// ResolveWithStrategy 根据 IP 策略解析目标地址
 // 返回格式化的地址，优先返回指定类型的 IP
-func resolveWithStrategy(target string, strategy byte) string {
+func ResolveWithStrategy(target string, strategy IPStrategy) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		return target
