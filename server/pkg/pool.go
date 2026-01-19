@@ -76,7 +76,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// 如果客户端没有提供 ch_id，服务端自动分配
+		// 如果客户端没有提供 ch_id,服务端自动分配
 		p.mu.Lock()
 		chID = p.nextChID
 		p.nextChID++
@@ -165,11 +165,11 @@ func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, met
 	st.mu.RUnlock()
 
 	if downlink > 0 {
-		// 已选择下行通道：单播
+		// 已选择下行通道:单播
 		return p.sendToChannel(downlink, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
 	}
 
-	// 未选择：广播
+	// 未选择:广播
 	return p.broadcastWrite(websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
 }
 
@@ -189,7 +189,7 @@ func (p *serverPool) broadcastWrite(msgType int, data []byte) error {
 		return fmt.Errorf("无可用通道")
 	}
 
-	// 发送到所有活跃通道，忽略写队列满错误
+	// 发送到所有活跃通道,忽略写队列满错误
 	for _, wsConn := range activeConns {
 		_ = wsConn.asyncWrite(msgType, data)
 	}

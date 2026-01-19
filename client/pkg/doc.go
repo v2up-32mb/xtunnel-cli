@@ -1,4 +1,4 @@
-// Package client 提供基于 WebSocket 的隧道代理客户端。
+// Package client 提供基于 WebSocket 的隧道代理客户端.
 //
 // 基本使用:
 //

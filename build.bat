@@ -75,7 +75,7 @@ set PLATFORMS=linux/amd64 linux/arm64 linux/armv7 windows/amd64 windows/386
 REM 创建输出目录
 if not exist bin mkdir bin
 
-REM 如果需要清理，删除旧的二进制文件
+REM 如果需要清理,删除旧的二进制文件
 if "%CLEAN%"=="true" (
     echo 清理 bin 目录...
     del /q bin\xtunnel-*.* 2>nul

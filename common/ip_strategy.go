@@ -35,14 +35,14 @@ func ParseIPStrategy(s string) (IPStrategy, error) {
 }
 
 // ResolveWithStrategy 根据 IP 策略解析目标地址
-// 返回格式化的地址，优先返回指定类型的 IP
+// 返回格式化的地址,优先返回指定类型的 IP
 func ResolveWithStrategy(target string, strategy IPStrategy) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		return target
 	}
 
-	// 如果已经是纯 IP 地址，直接返回
+	// 如果已经是纯 IP 地址,直接返回
 	if ip := net.ParseIP(host); ip != nil {
 		// IPv6 地址需要加括号
 		if ip.To4() == nil && !strings.HasPrefix(host, "[") {

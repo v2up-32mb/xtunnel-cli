@@ -66,7 +66,7 @@ func (wsConn *ServerWSConn) readLoop() {
 	wsConn.ws.SetPingHandler(func(m string) error {
 		wsConn.ws.SetReadDeadline(time.Now().Add(wsConn.pool.config.ReadTimeout))
 		_ = wsConn.asyncWrite(websocket.PongMessage, []byte(m))
-		// pong 发送失败不影响 ping/pong 循环，总是返回 nil
+		// pong 发送失败不影响 ping/pong 循环,总是返回 nil
 		return nil
 	})
 

@@ -40,18 +40,18 @@ func (m *ECHManager) Prepare() error {
 		log.Printf("[客户端] DNS查询 ECH: %s -> %s", m.config.DNSServer, m.config.ECHDomain)
 		echBase64, err := m.queryHTTPSRecord(m.config.ECHDomain, m.config.DNSServer)
 		if err != nil {
-			log.Printf("[客户端] DNS 查询失败: %v，重试...", err)
+			log.Printf("[客户端] DNS 查询失败: %v,重试...", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		if echBase64 == "" {
-			log.Printf("[客户端] 未找到 ECH 参数，重试...")
+			log.Printf("[客户端] 未找到 ECH 参数,重试...")
 			time.Sleep(2 * time.Second)
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(echBase64)
 		if err != nil {
-			log.Printf("[客户端] ECH Base64 解码失败: %v，重试...", err)
+			log.Printf("[客户端] ECH Base64 解码失败: %v,重试...", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}

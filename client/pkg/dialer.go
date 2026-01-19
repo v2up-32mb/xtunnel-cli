@@ -63,10 +63,10 @@ func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, e
 				_, port, _ := net.SplitHostPort(address)
 				// 检查 relayIP 是否已经包含端口
 				if _, _, err := net.SplitHostPort(relayIP); err == nil {
-					// relayIP 已经包含端口，直接使用
+					// relayIP 已经包含端口,直接使用
 					return net.DialTimeout(network, relayIP, p.config.DialTimeout)
 				}
-				// relayIP 不包含端口，使用 JoinHostPort
+				// relayIP 不包含端口,使用 JoinHostPort
 				return net.DialTimeout(network, net.JoinHostPort(relayIP, port), p.config.DialTimeout)
 			}
 		}
@@ -74,7 +74,7 @@ func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, e
 		conn, resp, err := dialer.Dial(dialAddr, nil)
 		if err != nil {
 			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-				return nil, fmt.Errorf("认证失败：Token 不匹配或未提供")
+				return nil, fmt.Errorf("认证失败:Token 不匹配或未提供")
 			}
 			// ECH 相关错误时重试
 			if p.config.EnableECH && (strings.Contains(err.Error(), "ECH") || strings.Contains(err.Error(), "ech")) && i < maxRetries {

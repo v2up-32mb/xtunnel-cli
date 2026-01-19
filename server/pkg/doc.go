@@ -1,4 +1,4 @@
-// Package server 提供基于 WebSocket 的隧道代理服务端。
+// Package server 提供基于 WebSocket 的隧道代理服务端.
 //
 // 基本使用:
 //

@@ -22,11 +22,11 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 	ipStrategy := common.IPStrategy(meta[0])
 	target := string(meta[1:])
 
-	// 第一个到达的通道占用连接，后续的丢弃
+	// 第一个到达的通道占用连接,后续的丢弃
 	p.mu.Lock()
 	st, exists := p.conns[connID]
 	if !exists {
-		// 第一个到达的通道：创建状态并占用
+		// 第一个到达的通道:创建状态并占用
 		st = &ServerConnState{
 			connID:     connID,
 			target:     target,
@@ -47,7 +47,7 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 			st.clientAddr = wsConn.clientID
 		}
 
-		// 发送 MsgSelectUplink（广播），携带上行通道ID
+		// 发送 MsgSelectUplink（广播）,携带上行通道ID
 		uplinkChIDBytes := make([]byte, 4)
 		binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
 		_ = p.sendDownlink(connID, common.MsgSelectUplink, uplinkChIDBytes, nil)
@@ -58,9 +58,9 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 		go p.connectTarget(st)
 
 	} else {
-		// 后续通道：丢弃
+		// 后续通道:丢弃
 		p.mu.Unlock()
-		// 已有其他通道处理此连接，静默丢弃
+		// 已有其他通道处理此连接,静默丢弃
 	}
 }
 
@@ -123,9 +123,9 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 	st.mu.RUnlock()
 
 	if targetConn == nil {
-		// 连接还未建立，缓存数据
+		// 连接还未建立,缓存数据
 		st.mu.Lock()
-		// 避免重复缓存：如果已经有缓存数据，就不再添加（广播消息可能重复）
+		// 避免重复缓存:如果已经有缓存数据,就不再添加（广播消息可能重复）
 		if st.targetConn == nil && len(st.pendingData) == 0 {
 			st.pendingData = append(st.pendingData, payload)
 		}
@@ -133,14 +133,14 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 		return
 	}
 
-	// 只接受来自上行通道的数据，其余通道丢弃
+	// 只接受来自上行通道的数据,其余通道丢弃
 	st.mu.RLock()
 	uplinkChID := st.uplinkChID
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
-		// 调试日志：需要时可解除注释
-		// log.Printf("[服务端] 警告: 收到来自通道 %d 的数据，但上行通道是 %d, ID:%s，忽略",
+		// 调试日志:需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的数据,但上行通道是 %d, ID:%s,忽略",
 		// 	chID, uplinkChID, common.ShortID(connID))
 		return
 	}
@@ -154,12 +154,12 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 
 // handleSelectDownlink 处理选择下行通道
 func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) {
-	// meta 包含客户端选择的下行通道号（4字节，大端序）
+	// meta 包含客户端选择的下行通道号（4字节,大端序）
 	var downlinkChID int
 	if len(meta) >= 4 {
 		downlinkChID = int(binary.BigEndian.Uint32(meta[0:4]))
 	} else {
-		// 兼容旧版本：使用当前发送消息的通道
+		// 兼容旧版本:使用当前发送消息的通道
 		downlinkChID = chID
 	}
 
@@ -184,7 +184,7 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
-		log.Printf("[服务端] 警告: MsgSelectDownlink 来自通道 %d，但上行通道是 %d, ID:%s，忽略",
+		log.Printf("[服务端] 警告: MsgSelectDownlink 来自通道 %d,但上行通道是 %d, ID:%s,忽略",
 			chID, uplinkChID, common.ShortID(connID))
 		return
 	}
@@ -193,8 +193,8 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 	if st.downlinkChID == 0 {
 		st.downlinkChID = downlinkChID
 	} else {
-		// 已经选择过下行通道，但收到另一个选择请求
-		log.Printf("[服务端] 警告: %s 访问: %s, 当前下行通道 %d, 试图改为 %d, ID:%s，忽略",
+		// 已经选择过下行通道,但收到另一个选择请求
+		log.Printf("[服务端] 警告: %s 访问: %s, 当前下行通道 %d, 试图改为 %d, ID:%s,忽略",
 			st.clientAddr, st.target, st.downlinkChID, downlinkChID, common.ShortID(connID))
 	}
 	st.mu.Unlock()
@@ -269,7 +269,7 @@ func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
 		st.clientAddr = wsConn.clientID
 	}
 
-	// 发送 MsgSelectUplink（广播），携带上行通道ID
+	// 发送 MsgSelectUplink（广播）,携带上行通道ID
 	uplinkChIDBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
 	_ = p.sendDownlink(connID, common.MsgSelectUplink, uplinkChIDBytes, nil)
@@ -290,14 +290,14 @@ func (p *serverPool) handleUDPData(chID int, connID string, meta, payload []byte
 		return
 	}
 
-	// 只接受来自上行通道的数据，其余通道丢弃
+	// 只接受来自上行通道的数据,其余通道丢弃
 	st.mu.RLock()
 	uplinkChID := st.uplinkChID
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
-		// 调试日志：需要时可解除注释
-		// log.Printf("[服务端] 警告: 收到来自通道 %d 的 UDP 数据，但上行通道是 %d, ID:%s，忽略",
+		// 调试日志:需要时可解除注释
+		// log.Printf("[服务端] 警告: 收到来自通道 %d 的 UDP 数据,但上行通道是 %d, ID:%s,忽略",
 		// 	chID, uplinkChID, common.ShortID(connID))
 		return
 	}
