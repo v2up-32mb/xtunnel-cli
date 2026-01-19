@@ -1,10 +1,5 @@
-//go:build client || server
-// +build client || server
-
-// Deprecated: 此文件已废弃，请使用 x-tunnel/common 包。
-// 此文件将在 v2.0 版本中移除。
-// 迁移指南：使用 common.ProtocolMessageType 等类型
-package main
+// Package common 提供 client 和 server 共享的二进制协议定义
+package common
 
 import (
 	"encoding/binary"
@@ -13,6 +8,7 @@ import (
 
 // ======================== 二进制协议 ========================
 
+// MessageType 消息类型
 type MessageType uint8
 
 const (
@@ -27,6 +23,7 @@ const (
 	MsgSelectDownlink
 )
 
+// ConnStatus 连接状态
 type ConnStatus uint8
 
 const (
@@ -36,7 +33,8 @@ const (
 
 const headerLen = 8
 
-func encodeMessage(t MessageType, connID string, meta, payload []byte) []byte {
+// EncodeMessage 编码消息
+func EncodeMessage(t MessageType, connID string, meta, payload []byte) []byte {
 	if len(connID) > 255 {
 		connID = connID[:255]
 	}
@@ -54,7 +52,8 @@ func encodeMessage(t MessageType, connID string, meta, payload []byte) []byte {
 	return buf
 }
 
-func decodeMessage(b []byte) (t MessageType, connID string, meta, payload []byte, err error) {
+// DecodeMessage 解码消息
+func DecodeMessage(b []byte) (t MessageType, connID string, meta, payload []byte, err error) {
 	if len(b) < headerLen {
 		return 0, "", nil, nil, errors.New("帧过短")
 	}
@@ -74,13 +73,3 @@ func decodeMessage(b []byte) (t MessageType, connID string, meta, payload []byte
 	payload = b[off : off+payloadLen]
 	return t, connID, meta, payload, nil
 }
-
-// ======================== IP 策略 ========================
-
-const (
-	IPStrategyDefault  byte = 0
-	IPStrategyIPv4Only byte = 1
-	IPStrategyIPv6Only byte = 2
-	IPStrategyPv4Pv6   byte = 3
-	IPStrategyPv6Pv4   byte = 4
-)
