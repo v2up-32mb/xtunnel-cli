@@ -30,6 +30,7 @@ go.work.sum
 *.swo
 *~
 .DS_Store
+.sisyphus/
 
 # 调试文件
 core

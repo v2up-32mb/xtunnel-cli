@@ -60,7 +60,7 @@ func init() {
 	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表,逗号分隔,如 443,8443")
 	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
 	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
-	flag.StringVar(&dnsServer, "dns", "https://doh.pub/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
+	flag.StringVar(&dnsServer, "dns", "https://v.recipes/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "用于查询 ECH 公钥的域名")
 	flag.BoolVar(&fallback, "fallback", false, "是否禁用 ECH 并回落到普通 TLS 1.3 (默认 false)")
 	flag.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
