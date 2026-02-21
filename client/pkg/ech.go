@@ -19,7 +19,6 @@ import (
 
 const typeHTTPS = 65
 
-// ECHManager ECH 管理器
 type ECHManager struct {
 	config      *Config
 	echList     []byte
@@ -27,14 +26,12 @@ type ECHManager struct {
 	refreshMu   sync.Mutex
 }
 
-// NewECHManager 创建 ECH 管理器
 func NewECHManager(cfg *Config) *ECHManager {
 	return &ECHManager{
 		config: cfg,
 	}
 }
 
-// Prepare 获取 ECH 配置
 func (m *ECHManager) Prepare() error {
 	for {
 		log.Printf("[客户端] DNS查询 ECH: %s -> %s", m.config.DNSServer, m.config.ECHDomain)
@@ -63,7 +60,6 @@ func (m *ECHManager) Prepare() error {
 	}
 }
 
-// Refresh 刷新 ECH 配置
 func (m *ECHManager) Refresh() error {
 	if !m.config.EnableECH {
 		return nil
@@ -83,7 +79,6 @@ func (m *ECHManager) Refresh() error {
 	return m.Prepare()
 }
 
-// GetList 获取当前 ECH 配置
 func (m *ECHManager) GetList() ([]byte, error) {
 	if !m.config.EnableECH {
 		return nil, nil
@@ -96,7 +91,6 @@ func (m *ECHManager) GetList() ([]byte, error) {
 	return m.echList, nil
 }
 
-// BuildTLSConfig 构建 TLS 配置
 func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
 	if !m.config.EnableECH {
 		return m.buildStandardTLSConfig(serverName)
@@ -114,7 +108,6 @@ func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
 	return cfgTLS, nil
 }
 
-// buildTLSConfigWithECH 构建 TLS 配置（启用 ECH）
 func (m *ECHManager) buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
@@ -131,7 +124,6 @@ func (m *ECHManager) buildTLSConfigWithECH(serverName string, echList []byte) (*
 	}, nil
 }
 
-// buildStandardTLSConfig 构建 TLS 配置（禁用 ECH）
 func (m *ECHManager) buildStandardTLSConfig(serverName string) (*tls.Config, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
@@ -145,7 +137,6 @@ func (m *ECHManager) buildStandardTLSConfig(serverName string) (*tls.Config, err
 	}, nil
 }
 
-// queryHTTPSRecord 查询 HTTPS 记录
 func (m *ECHManager) queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	if strings.HasPrefix(dnsServer, "http://") || strings.HasPrefix(dnsServer, "https://") {
 		return m.queryDoH(domain, dnsServer)
@@ -153,7 +144,6 @@ func (m *ECHManager) queryHTTPSRecord(domain, dnsServer string) (string, error) 
 	return m.queryDNSUDP(domain, dnsServer)
 }
 
-// queryDNSUDP 通过 UDP 查询 DNS
 func (m *ECHManager) queryDNSUDP(domain, dnsServer string) (string, error) {
 	if !strings.Contains(dnsServer, ":") {
 		dnsServer = dnsServer + ":53"
@@ -183,7 +173,6 @@ func (m *ECHManager) queryDNSUDP(domain, dnsServer string) (string, error) {
 	return parseDNSResponse(response[:n])
 }
 
-// queryDoH 通过 DoH 查询 DNS
 func (m *ECHManager) queryDoH(domain, dohURL string) (string, error) {
 	u, err := url.Parse(dohURL)
 	if err != nil {
@@ -200,7 +189,7 @@ func (m *ECHManager) queryDoH(domain, dohURL string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/dns-message")
-	req.Header.Set("Content-Type", "application/dns-message")
+	// Content-Type removed for GET requests per RFC 8484
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
@@ -218,11 +207,9 @@ func (m *ECHManager) queryDoH(domain, dohURL string) (string, error) {
 	return parseDNSResponse(body)
 }
 
-// buildDNSQuery 构建 DNS 查询报文
 func buildDNSQuery(domain string, qtype uint16) []byte {
 	query := make([]byte, 0, 512)
-	// ID=0x0001, RD=1
-	query = append(query, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00)
+	query = append(query, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 	for _, label := range strings.Split(domain, ".") {
 		query = append(query, byte(len(label)))
 		query = append(query, []byte(label)...)
@@ -232,7 +219,6 @@ func buildDNSQuery(domain string, qtype uint16) []byte {
 	return query
 }
 
-// parseDNSResponse 解析 DNS 响应
 func parseDNSResponse(response []byte) (string, error) {
 	if len(response) < 12 {
 		return "", fmt.Errorf("响应过短")
@@ -246,13 +232,12 @@ func parseDNSResponse(response []byte) (string, error) {
 	for offset < len(response) && response[offset] != 0 {
 		offset += int(response[offset]) + 1
 	}
-	offset += 5 // 0 + QTYPE(2) + QCLASS(2)
+	offset += 5
 
 	for i := 0; i < int(ancount); i++ {
 		if offset >= len(response) {
 			break
 		}
-		// NAME: pointer or labels
 		if response[offset]&0xC0 == 0xC0 {
 			offset += 2
 		} else {
@@ -265,7 +250,7 @@ func parseDNSResponse(response []byte) (string, error) {
 			break
 		}
 		rrType := binary.BigEndian.Uint16(response[offset : offset+2])
-		offset += 8 // TYPE(2)+CLASS(2)+TTL(4)
+		offset += 8
 		dataLen := binary.BigEndian.Uint16(response[offset : offset+2])
 		offset += 2
 		if offset+int(dataLen) > len(response) {
@@ -282,13 +267,11 @@ func parseDNSResponse(response []byte) (string, error) {
 	return "", nil
 }
 
-// parseHTTPSRecord 解析 HTTPS 记录中的 ECH 配置
 func parseHTTPSRecord(data []byte) string {
 	if len(data) < 2 {
 		return ""
 	}
-	offset := 2 // priority
-	// targetName (root=0) or labels
+	offset := 2
 	if offset < len(data) && data[offset] == 0 {
 		offset++
 	} else {
@@ -297,7 +280,6 @@ func parseHTTPSRecord(data []byte) string {
 		}
 		offset++
 	}
-	// params: key(2) len(2) value(len)
 	for offset+4 <= len(data) {
 		key := binary.BigEndian.Uint16(data[offset : offset+2])
 		length := binary.BigEndian.Uint16(data[offset+2 : offset+4])
@@ -307,7 +289,6 @@ func parseHTTPSRecord(data []byte) string {
 		}
 		value := data[offset : offset+int(length)]
 		offset += int(length)
-		// ECHConfigList is parameter key=5
 		if key == 5 {
 			return base64.StdEncoding.EncodeToString(value)
 		}
