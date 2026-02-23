@@ -89,11 +89,11 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 
 // Start 启动连接池
 func (p *clientPool) Start(relayNodes []string) {
-	// 准备 ECH 配置
+	// 启动 ECH 管理器（包含定期刷新）
 	if p.config.EnableECH {
 		go func() {
-			if err := p.echManager.Prepare(); err != nil {
-				log.Printf("[客户端] ECH 准备失败: %v", err)
+			if err := p.echManager.Start(); err != nil {
+				log.Printf("[客户端] ECH 启动失败: %v", err)
 			}
 		}()
 	}
@@ -163,13 +163,16 @@ func (p *clientPool) Start(relayNodes []string) {
 func (p *clientPool) Shutdown() {
 	log.Printf("[客户端] 正在关闭所有连接...")
 
-	// 1. 停止中转节点管理器
+	// 1. 停止 ECH 管理器
+	p.echManager.Stop()
+
+	// 2. 停止中转节点管理器
 	p.relayManager.Stop()
 
-	// 2. 取消 context,通知所有 goroutine 退出
+	// 3. 取消 context,通知所有 goroutine 退出
 	p.cancel()
 
-	// 3. 关闭所有写队列,停止写入
+	// 4. 关闭所有写队列,停止写入
 	for i, q := range p.writeQueues {
 		if q != nil {
 			close(q)
@@ -177,7 +180,7 @@ func (p *clientPool) Shutdown() {
 		}
 	}
 
-	// 4. 优雅关闭所有 WebSocket 连接
+	// 5. 优雅关闭所有 WebSocket 连接
 	p.wsConnsMu.Lock()
 	defer p.wsConnsMu.Unlock()
 
