@@ -19,16 +19,26 @@ import (
 
 const typeHTTPS = 65
 
+// ECH 配置有效期（1小时）
+const echConfigTTL = 1 * time.Hour
+
+// 定期刷新间隔（5分钟）
+const echRefreshInterval = 5 * time.Minute
+
 type ECHManager struct {
-	config      *Config
-	echList     []byte
-	echListMu   sync.RWMutex
-	refreshMu   sync.Mutex
+	config       *Config
+	echList      []byte
+	echListMu    sync.RWMutex
+	refreshMu    sync.Mutex
+	refreshTimer *time.Ticker  // 定期刷新定时器
+	stopChan     chan struct{} // 停止信号通道
+	lastRefresh  time.Time     // 最后刷新时间
 }
 
 func NewECHManager(cfg *Config) *ECHManager {
 	return &ECHManager{
-		config: cfg,
+		config:   cfg,
+		stopChan: make(chan struct{}),
 	}
 }
 
@@ -52,10 +62,11 @@ func (m *ECHManager) Prepare() error {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		m.echListMu.Lock()
-		m.echList = raw
-		m.echListMu.Unlock()
-		log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
+	m.echListMu.Lock()
+	m.echList = raw
+	m.lastRefresh = time.Now()
+	m.echListMu.Unlock()
+	log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
 		return nil
 	}
 }
@@ -68,12 +79,9 @@ func (m *ECHManager) Refresh() error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
-	m.echListMu.RLock()
-	if len(m.echList) > 0 {
-		m.echListMu.RUnlock()
-		return nil
-	}
-	m.echListMu.RUnlock()
+	m.echListMu.Lock()
+	m.echList = nil
+	m.echListMu.Unlock()
 
 	log.Printf("[客户端] 刷新 ECH 配置...")
 	return m.Prepare()
@@ -88,7 +96,49 @@ func (m *ECHManager) GetList() ([]byte, error) {
 	if len(m.echList) == 0 {
 		return nil, errors.New("ECH 配置尚未加载")
 	}
+	if time.Since(m.lastRefresh) > echConfigTTL {
+		return nil, errors.New("ECH 配置已过期")
+	}
 	return m.echList, nil
+}
+
+func (m *ECHManager) Start() error {
+	if !m.config.EnableECH {
+		return nil
+	}
+
+	if err := m.Prepare(); err != nil {
+		return err
+	}
+
+	m.refreshTimer = time.NewTicker(echRefreshInterval)
+	go func() {
+		for {
+			select {
+			case <-m.refreshTimer.C:
+				m.echListMu.RLock()
+				timeToExpiry := echConfigTTL - time.Since(m.lastRefresh)
+				m.echListMu.RUnlock()
+
+				if timeToExpiry < 10*time.Minute {
+					log.Printf("[客户端] ECH 配置即将过期，主动刷新...")
+					_ = m.Refresh()
+				}
+			case <-m.stopChan:
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (m *ECHManager) Stop() {
+	if m.refreshTimer != nil {
+		m.refreshTimer.Stop()
+	}
+	close(m.stopChan)
+	log.Printf("[客户端] ECH 管理器已停止")
 }
 
 func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
