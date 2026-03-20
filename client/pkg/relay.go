@@ -268,6 +268,11 @@ func (m *RelayNodeManager) GetNodeByIP(ip string) *RelayNode {
 
 // Start 启动后台测速任务
 func (m *RelayNodeManager) Start() {
+	// 首先执行一次同步测速，确保初始化时有可用的节点评分
+	log.Printf("[客户端] 执行初始节点测速...")
+	m.testAllNodes()
+	log.Printf("[客户端] 初始节点测速完成")
+
 	m.testTimer = time.NewTicker(30 * time.Second)
 	go m.speedTestLoop()
 }
