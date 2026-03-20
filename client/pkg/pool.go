@@ -62,6 +62,7 @@ type clientPool struct {
 	conns map[string]*clientConnState
 
 	relayCount int
+	socks5Sem chan struct{} // SOCKS5 连接信号量
 }
 
 // newClientPool 创建新的连接池
@@ -78,6 +79,11 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		conns:           make(map[string]*clientConnState),
 		globalQueueLimit: int64(cfg.ReadBufferSize) * 8,
 		nextChannel:     1,
+	}
+
+	// 初始化 SOCKS5 连接信号量
+	if cfg.MaxSOCKS5Connections > 0 {
+		p.socks5Sem = make(chan struct{}, cfg.MaxSOCKS5Connections)
 	}
 
 	for i := 0; i < cfg.Connections; i++ {
@@ -269,7 +275,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
 
-		go p.writeWorker(idx, wsConn)
+		go p.writeWorker(idx, wsConn, p.writeQueues[idx])
 		p.handleChannel(chID, wsConn)
 
 		_ = wsConn.Close()
@@ -285,8 +291,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 }
 
 // writeWorker 写入协程
-func (p *clientPool) writeWorker(id int, conn *websocket.Conn) {
-	queue := p.writeQueues[id]
+func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJob) {
 	ticker := time.NewTicker(p.config.PingInterval)
 	defer ticker.Stop()
 
@@ -380,7 +385,7 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn) {
 					// 队列已关闭,正常退出
 					goto writeAgg
 				}
-				atomic.AddInt64(&p.globalQueueBytes, int64(-next.size))
+				// 注意:next.size 已在取出时扣除(line 341),此处不再重复扣除
 				if next.msgType != websocket.BinaryMessage {
 					pending = &next
 					goto writeAgg
@@ -845,10 +850,12 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				if _, err := c.Write(payload); err != nil {
 					_ = p.SendCloseDirect(chID, connID)
 					_ = c.Close()
+					p.Unregister(connID)
 				}
 				_ = c.SetWriteDeadline(time.Time{})
 			} else {
 				_ = p.SendCloseDirect(chID, connID)
+				p.Unregister(connID)
 			}
 
 		case common.MsgTCPClose:
@@ -920,9 +927,22 @@ func (p *clientPool) Stats() *Stats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	// 计算活跃通道数
+	p.wsConnsMu.RLock()
+	activeChannels := 0
+	for _, conn := range p.wsConns {
+		if conn != nil {
+			activeChannels++
+		}
+	}
+	p.wsConnsMu.RUnlock()
+
+	// 获取中转节点数
+	relayNodes := p.relayManager.NodeCount()
+
 	return &Stats{
-		Connections:    len(p.conns),
-		ActiveChannels: 0,
-		RelayNodes:     0,
+		Connections:   len(p.conns),
+		ActiveChannels: activeChannels,
+		RelayNodes:    relayNodes,
 	}
 }

@@ -49,6 +49,9 @@ type Config struct {
 	// 缓冲区大小
 	ReadBufferSize  int // 读缓冲区大小
 	WriteBufferSize int // 写缓冲区大小
+
+	// SOCKS5 连接限制
+	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
 }
 
 // DefaultConfig 返回带有合理默认值的配置
@@ -67,7 +70,8 @@ func DefaultConfig() *Config {
 		IPStrategy:        common.IPStrategyDefault,
 		ReadBufferSize:    64 * 1024,
 		WriteBufferSize:   64 * 1024,
-		UDPBlockedPorts:   []int{443},
+		UDPBlockedPorts:       []int{443},
+		MaxSOCKS5Connections: 1024, // 默认最大 1024 个并发连接
 	}
 }
 

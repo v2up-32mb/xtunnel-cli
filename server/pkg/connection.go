@@ -35,6 +35,9 @@ type ServerConnState struct {
 	pendingData  [][]byte // 连接建立前到达的数据缓存
 }
 
+// pendingDataMaxSize 缓存数据最大字节数（防止恶意客户端耗尽内存）
+const pendingDataMaxSize = 1024 * 1024 // 1MB
+
 // ServerWSConn WebSocket 连接
 type ServerWSConn struct {
 	ws        *websocket.Conn

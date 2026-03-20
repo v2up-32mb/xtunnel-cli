@@ -14,8 +14,8 @@ import (
 
 // GenerateSelfSignedCert 生成自签证书
 func GenerateSelfSignedCert() (tls.Certificate, error) {
-	// 生成 RSA 私钥
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	// 生成 RSA 私钥 (3072 位,符合现代安全标准)
+	priv, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		return tls.Certificate{}, err
 	}

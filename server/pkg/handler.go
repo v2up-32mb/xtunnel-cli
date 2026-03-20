@@ -125,6 +125,17 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 	if targetConn == nil {
 		// 连接还未建立,缓存数据
 		st.mu.Lock()
+		// 检查缓存大小限制,防止恶意客户端耗尽内存
+		var currentSize int
+		for _, d := range st.pendingData {
+			currentSize += len(d)
+		}
+		if currentSize+len(payload) > pendingDataMaxSize {
+			st.mu.Unlock()
+			log.Printf("[服务端] pendingData 超出限制 %d bytes, 拒绝连接 ID:%s", pendingDataMaxSize, common.ShortID(connID))
+			p.unregisterConn(connID)
+			return
+		}
 		// 避免重复缓存:如果已经有缓存数据,就不再添加（广播消息可能重复）
 		if st.targetConn == nil && len(st.pendingData) == 0 {
 			st.pendingData = append(st.pendingData, payload)
