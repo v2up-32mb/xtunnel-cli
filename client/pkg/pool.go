@@ -228,6 +228,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
 	var relayInfo string
 	var lastIP string
+	firstAttempt := true // 标记是否是首次尝试
 	for {
 		// 检查是否需要退出
 		select {
@@ -238,7 +239,8 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		}
 
 		// 如果有中转节点配置,在重连时申请新节点
-		if p.relayCount > 0 && lastIP != "" {
+		// 修改: 只要不是首次尝试且有中转节点,就尝试换节点
+		if p.relayCount > 0 && !firstAttempt {
 			healthyIPs := p.relayManager.GetHealthyRelayIPs()
 			newNode := p.relayManager.SelectNodeExcluding(healthyIPs)
 			if newNode != nil {
@@ -250,6 +252,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 				log.Printf("[客户端] 通道 %d 重连:无可用的健康中转节点,使用原有节点", chID)
 			}
 		}
+		firstAttempt = false // 首次尝试后标记为 false
 
 		wsConn, err := p.dialWebSocket(chID, ip)
 		if err != nil {
