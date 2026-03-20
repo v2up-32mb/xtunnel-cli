@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -30,43 +31,65 @@ type ECHManager struct {
 	echList      []byte
 	echListMu    sync.RWMutex
 	refreshMu    sync.Mutex
-	refreshTimer *time.Ticker  // 定期刷新定时器
+	refreshTimer *time.Ticker // 定期刷新定时器
 	stopChan     chan struct{} // 停止信号通道
-	lastRefresh  time.Time     // 最后刷新时间
+	lastRefresh  time.Time    // 最后刷新时间
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 func NewECHManager(cfg *Config) *ECHManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &ECHManager{
 		config:   cfg,
 		stopChan: make(chan struct{}),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
 func (m *ECHManager) Prepare() error {
 	for {
+		select {
+		case <-m.ctx.Done():
+			return m.ctx.Err()
+		default:
+		}
 		log.Printf("[客户端] DNS查询 ECH: %s -> %s", m.config.DNSServer, m.config.ECHDomain)
 		echBase64, err := m.queryHTTPSRecord(m.config.ECHDomain, m.config.DNSServer)
 		if err != nil {
 			log.Printf("[客户端] DNS 查询失败: %v,重试...", err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-time.After(2 * time.Second):
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
 			continue
 		}
 		if echBase64 == "" {
 			log.Printf("[客户端] 未找到 ECH 参数,重试...")
-			time.Sleep(2 * time.Second)
+			select {
+			case <-time.After(2 * time.Second):
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(echBase64)
 		if err != nil {
 			log.Printf("[客户端] ECH Base64 解码失败: %v,重试...", err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-time.After(2 * time.Second):
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
 			continue
 		}
-	m.echListMu.Lock()
-	m.echList = raw
-	m.lastRefresh = time.Now()
-	m.echListMu.Unlock()
-	log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
+		m.echListMu.Lock()
+		m.echList = raw
+		m.lastRefresh = time.Now()
+		m.echListMu.Unlock()
+		log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
 		return nil
 	}
 }
@@ -137,6 +160,7 @@ func (m *ECHManager) Stop() {
 	if m.refreshTimer != nil {
 		m.refreshTimer.Stop()
 	}
+	m.cancel()
 	close(m.stopChan)
 	log.Printf("[客户端] ECH 管理器已停止")
 }

@@ -116,7 +116,24 @@ func (p *clientPool) ListenSOCKS5(addr string) error {
 			if err != nil {
 				continue
 			}
-			go p.handleSOCKS5(c, cfgp)
+			// 检查连接数限制
+			if p.socks5Sem != nil {
+				select {
+				case p.socks5Sem <- struct{}{}:
+					// 获得信号量,继续处理
+					go func(conn net.Conn) {
+						defer func() { <-p.socks5Sem }()
+						p.handleSOCKS5(conn, cfgp)
+					}(c)
+				default:
+					// 达到连接上限,拒绝连接
+					log.Printf("[客户端] SOCKS5 连接数已达上限,拒绝新连接")
+					c.Close()
+				}
+			} else {
+				// 无连接限制
+				go p.handleSOCKS5(c, cfgp)
+			}
 		}
 	}()
 

@@ -62,7 +62,9 @@ func DecodeMessage(b []byte) (t MessageType, connID string, meta, payload []byte
 	metaLen := int(binary.BigEndian.Uint16(b[2:4]))
 	payloadLen := int(binary.BigEndian.Uint32(b[4:8]))
 	total := headerLen + idLen + metaLen + payloadLen
-	if idLen < 0 || metaLen < 0 || payloadLen < 0 || total < headerLen || total > len(b) {
+	// 注意: idLen 来自 uint8 转 int, 不会为负; metaLen 和 payloadLen 来自固定宽度无符号整数转 int
+	// 在 32 位系统上, payloadLen 可能溢出, 检查 total 是否小于 headerLen
+	if total < headerLen || total > len(b) {
 		return 0, "", nil, nil, errors.New("长度无效")
 	}
 	off := headerLen

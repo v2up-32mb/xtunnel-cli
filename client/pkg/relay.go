@@ -18,7 +18,8 @@ type RelayNode struct {
 	LastTest    time.Time     // 最后测试时间
 	Latency     time.Duration // 延迟
 	SuccessRate float64       // 成功率
-	Weight      float64       // 权重（用于负载均衡）
+	Weight     float64   // 权重（用于负载均衡）
+	mu         sync.RWMutex // 保护字段的并发访问
 }
 
 // RelayNodeManager 管理所有中转节点
@@ -296,14 +297,20 @@ func (m *RelayNodeManager) testAllNodes() {
 		go func(n *RelayNode) {
 			defer wg.Done()
 			if err := m.TestNodeSpeed(n); err != nil {
+				n.mu.Lock()
 				n.Latency = 9999 * time.Second
 				n.SuccessRate = 0.0
+				n.mu.Unlock()
 			} else {
+				n.mu.Lock()
 				n.SuccessRate = 1.0
+				n.mu.Unlock()
 			}
+			n.mu.Lock()
 			n.LastTest = time.Now()
 			n.Score = n.CalculateScore()
 			n.Weight = n.Score
+			n.mu.Unlock()
 		}(node)
 	}
 	wg.Wait()
@@ -378,4 +385,11 @@ func (m *RelayNodeManager) GetAvailableHealthyCount() int {
 		}
 	}
 	return count
+}
+
+// NodeCount 返回节点总数
+func (m *RelayNodeManager) NodeCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.nodes)
 }
