@@ -241,8 +241,15 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		// 如果有中转节点配置,在重连时申请新节点
 		// 修改: 只要不是首次尝试且有中转节点,就尝试换节点
 		if p.relayCount > 0 && !firstAttempt {
-			healthyIPs := p.relayManager.GetHealthyRelayIPs()
-			newNode := p.relayManager.SelectNodeExcluding(healthyIPs)
+			// 修复: 排除当前失败的节点，而不是排除所有健康节点
+			excludeIPs := []string{}
+			if lastIP != "" {
+				excludeIPs = append(excludeIPs, lastIP)
+			}
+			if ip != "" && ip != lastIP {
+				excludeIPs = append(excludeIPs, ip)
+			}
+			newNode := p.relayManager.SelectNodeExcluding(excludeIPs)
 			if newNode != nil {
 				log.Printf("[客户端] 通道 %d 重连:申请新中转节点 %s (评分: %.2f, 延迟: %dms)",
 					chID, newNode.IP, newNode.Score, newNode.Latency.Milliseconds())
