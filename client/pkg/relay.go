@@ -18,8 +18,10 @@ type RelayNode struct {
 	LastTest    time.Time     // 最后测试时间
 	Latency     time.Duration // 延迟
 	SuccessRate float64       // 成功率
-	Weight     float64   // 权重（用于负载均衡）
-	mu         sync.RWMutex // 保护字段的并发访问
+	Weight      float64       // 权重（用于负载均衡）
+	FailCount   int           // 连续失败次数
+	FailTime    time.Time     // 最近失败时间
+	mu          sync.RWMutex  // 保护字段的并发访问
 }
 
 // RelayNodeManager 管理所有中转节点
@@ -343,41 +345,6 @@ func (m *RelayNodeManager) GetHealthyRelayIPs() []string {
 	return healthyIPs
 }
 
-// SelectNodeExcluding 申请1个新节点,排除指定的IP列表
-func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.nodes) == 0 {
-		return nil
-	}
-
-	// 创建排除集合
-	excludeMap := make(map[string]bool)
-	for _, ip := range excludeIPs {
-		excludeMap[ip] = true
-	}
-
-	// 按评分排序,排除已使用的IP
-	var candidates []*RelayNode
-	for _, node := range m.nodes {
-		if !excludeMap[node.IP] && node.SuccessRate > 0.0 {
-			candidates = append(candidates, node)
-		}
-	}
-
-	if len(candidates) == 0 {
-		return nil
-	}
-
-	// 按评分排序
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
-	})
-
-	return candidates[0]
-}
-
 // GetAvailableHealthyCount 获取可用健康节点数量（评分>30且成功率>0）
 func (m *RelayNodeManager) GetAvailableHealthyCount() int {
 	m.mu.RLock()
@@ -397,4 +364,99 @@ func (m *RelayNodeManager) NodeCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.nodes)
+}
+
+// MarkNodeFailed 标记节点失败
+func (m *RelayNodeManager) MarkNodeFailed(ip string) {
+	m.mu.RLock()
+	var node *RelayNode
+	for _, n := range m.nodes {
+		if n.IP == ip {
+			node = n
+			break
+		}
+	}
+	m.mu.RUnlock()
+
+	if node != nil {
+		node.mu.Lock()
+		node.FailCount++
+		node.FailTime = time.Now()
+		node.SuccessRate = 0.0
+		node.Score = 0.0
+		node.mu.Unlock()
+		log.Printf("[中转节点] 节点 %s 标记失败 (连续失败: %d)", ip, node.FailCount)
+	}
+}
+
+// MarkNodeSuccess 标记节点成功
+func (m *RelayNodeManager) MarkNodeSuccess(ip string) {
+	m.mu.RLock()
+	var node *RelayNode
+	for _, n := range m.nodes {
+		if n.IP == ip {
+			node = n
+			break
+		}
+	}
+	m.mu.RUnlock()
+
+	if node != nil {
+		node.mu.Lock()
+		node.FailCount = 0
+		node.SuccessRate = 1.0
+		node.mu.Unlock()
+	}
+}
+
+// SelectNodeExcluding 申请1个新节点,排除指定的IP列表
+func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.nodes) == 0 {
+		return nil
+	}
+
+	// 创建排除集合
+	excludeMap := make(map[string]bool)
+	for _, ip := range excludeIPs {
+		excludeMap[ip] = true
+	}
+
+	// 按评分排序,排除已使用的IP和近期失败的节点
+	var candidates []*RelayNode
+	now := time.Now()
+	for _, node := range m.nodes {
+		if excludeMap[node.IP] {
+			continue
+		}
+		// 检查节点是否在短时间内连续失败
+		node.mu.RLock()
+		failCount := node.FailCount
+		failTime := node.FailTime
+		successRate := node.SuccessRate
+		node.mu.RUnlock()
+
+		// 如果节点在最近 30 秒内失败超过 3 次，跳过
+		if failCount >= 3 && now.Sub(failTime) < 30*time.Second {
+			continue
+		}
+		// 如果节点成功率太低，跳过
+		if successRate <= 0.0 {
+			continue
+		}
+		candidates = append(candidates, node)
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 按评分排序
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+
+	return candidates[0]
 }

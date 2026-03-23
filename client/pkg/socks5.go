@@ -246,6 +246,30 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 
 	p.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
 
+	// 获取 connected 通道，等待连接建立或超时
+	p.mu.RLock()
+	st := p.conns[connID]
+	var connected chan bool
+	if st != nil {
+		connected = st.connected
+	}
+	p.mu.RUnlock()
+
+	// 等待连接建立或超时
+	if connected != nil {
+		select {
+		case <-connected:
+			// 连接成功，继续正常处理
+		case <-time.After(15 * time.Second):
+			// 连接超时，发送错误响应并关闭连接
+			log.Printf("[客户端] SOCKS5 连接 %s 超时", target)
+			_, _ = c.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			_ = c.Close()
+			p.Unregister(connID)
+			return
+		}
+	}
+
 	buf := make([]byte, 32*1024)
 
 	defer func() {

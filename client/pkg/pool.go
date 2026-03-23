@@ -229,6 +229,16 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 	var relayInfo string
 	var lastIP string
 	firstAttempt := true // 标记是否是首次尝试
+
+	// 重试控制
+	retryCount := 0
+	maxRetries := 20 // 最大重试次数
+
+	// 指数退避参数
+	baseDelay := 3 * time.Second
+	maxDelay := 60 * time.Second
+	currentDelay := baseDelay
+
 	for {
 		// 检查是否需要退出
 		select {
@@ -236,6 +246,12 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			log.Printf("[客户端] 通道 %d 已收到退出信号", chID)
 			return
 		default:
+		}
+
+		// 检查重试次数
+		if retryCount >= maxRetries {
+			log.Printf("[客户端] 通道 %d 重试次数超限 (%d 次)，放弃重连", chID, maxRetries)
+			return
 		}
 
 		// 如果有中转节点配置,在重连时申请新节点
@@ -263,17 +279,41 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 
 		wsConn, err := p.dialWebSocket(chID, ip)
 		if err != nil {
+			retryCount++
 			if relayInfo == "" && ip != "" {
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			}
-			log.Printf("[客户端] 通道 %d%s 连接失败: %v", chID, relayInfo, err)
+			log.Printf("[客户端] 通道 %d%s 连接失败: %v (重试 %d/%d)", chID, relayInfo, err, retryCount, maxRetries)
+
+			// 标记节点失败
+			if ip != "" && p.relayCount > 0 {
+				p.relayManager.MarkNodeFailed(ip)
+			}
+
+			// 计算退避时间（指数退避）
+			if currentDelay < maxDelay {
+				currentDelay = time.Duration(float64(currentDelay) * 1.5)
+				if currentDelay > maxDelay {
+					currentDelay = maxDelay
+				}
+			}
+
 			// 检查是否需要退出（避免在重连延迟时阻塞）
 			select {
 			case <-p.ctx.Done():
 				return
-			case <-time.After(3 * time.Second):
+			case <-time.After(currentDelay):
 				continue
 			}
+		}
+
+		// 连接成功，重置重试计数和退避时间
+		retryCount = 0
+		currentDelay = baseDelay
+
+		// 标记节点成功
+		if ip != "" && p.relayCount > 0 {
+			p.relayManager.MarkNodeSuccess(ip)
 		}
 
 		if ip != "" {
