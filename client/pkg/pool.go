@@ -62,24 +62,31 @@ type clientPool struct {
 	conns map[string]*clientConnState
 
 	relayCount int
-	socks5Sem chan struct{} // SOCKS5 连接信号量
+	socks5Sem  chan struct{} // SOCKS5 连接信号量
+
+	// 背压控制
+	backpressureState int32     // 原子操作，背压状态
+	backpressureCond  *sync.Cond // 用于暂停/恢复
+	backpressureMu    sync.Mutex // Cond 的锁
 }
 
 // newClientPool 创建新的连接池
 func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) (*clientPool, error) {
 	p := &clientPool{
-		config:          cfg,
-		ctx:             ctx,
-		cancel:          cancel,
-		echManager:      NewECHManager(cfg),
-		relayManager:    NewRelayNodeManager(),
-		wsConns:         make([]*websocket.Conn, cfg.Connections),
-		writeQueues:     make([]chan writeJob, cfg.Connections),
-		connsWriteMutex: make([]sync.Mutex, cfg.Connections),
-		conns:           make(map[string]*clientConnState),
-		globalQueueLimit: int64(cfg.ReadBufferSize) * 8,
-		nextChannel:     1,
+		config:            cfg,
+		ctx:               ctx,
+		cancel:            cancel,
+		echManager:        NewECHManager(cfg),
+		relayManager:      NewRelayNodeManager(),
+		wsConns:           make([]*websocket.Conn, cfg.Connections),
+		writeQueues:       make([]chan writeJob, cfg.Connections),
+		connsWriteMutex:   make([]sync.Mutex, cfg.Connections),
+		conns:             make(map[string]*clientConnState),
+		globalQueueLimit:  int64(cfg.ReadBufferSize) * 8,
+		nextChannel:       1,
+		backpressureState: int32(common.BackpressureNormal),
 	}
+	p.backpressureCond = sync.NewCond(&p.backpressureMu)
 
 	// 初始化 SOCKS5 连接信号量
 	if cfg.MaxSOCKS5Connections > 0 {
@@ -428,35 +435,35 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 		total := len(payload)
 		parts := [][]byte{payload}
 
+	AggLoop:
 		for {
 			select {
 			case next, ok := <-queue:
 				if !ok {
 					// 队列已关闭,正常退出
-					goto writeAgg
+					break AggLoop
 				}
 				// 注意:next.size 已在取出时扣除(line 341),此处不再重复扣除
 				if next.msgType != websocket.BinaryMessage {
 					pending = &next
-					goto writeAgg
+					break AggLoop
 				}
 				tt, cid, mm, pl, e := common.DecodeMessage(next.data)
 				if e != nil || tt != common.MsgTCPData || cid != connID || len(mm) != 0 {
 					pending = &next
-					goto writeAgg
+					break AggLoop
 				}
 				if total+len(pl) > maxAgg {
 					pending = &next
-					goto writeAgg
+					break AggLoop
 				}
 				parts = append(parts, pl)
 				total += len(pl)
 			default:
-				goto writeAgg
+				break AggLoop
 			}
 		}
 
-	writeAgg:
 		var merged []byte
 		if len(parts) == 1 {
 			merged = parts[0]
@@ -486,6 +493,18 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 	idx, err := p.chIndex(chID)
 	if err != nil {
 		return err
+	}
+
+	// 检查背压状态
+	delay := p.getBackpressureDelay()
+	if delay < 0 {
+		// 需要等待恢复
+		if !p.waitForBackpressure() {
+			return fmt.Errorf("客户端正在关闭")
+		}
+	} else if delay > 0 {
+		// 减速状态，添加延迟
+		time.Sleep(delay)
 	}
 
 	size := int64(len(data))
@@ -968,6 +987,13 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			} else {
 				p.Unregister(connID)
 			}
+
+		case common.MsgBackpressure:
+			// 处理背压通知
+			if len(meta) >= 1 {
+				state := common.BackpressureState(meta[0])
+				p.handleBackpressure(state)
+			}
 		}
 	}
 }
@@ -991,8 +1017,68 @@ func (p *clientPool) Stats() *Stats {
 	relayNodes := p.relayManager.NodeCount()
 
 	return &Stats{
-		Connections:   len(p.conns),
+		Connections:    len(p.conns),
 		ActiveChannels: activeChannels,
-		RelayNodes:    relayNodes,
+		RelayNodes:     relayNodes,
+	}
+}
+
+// handleBackpressure 处理背压状态变化
+func (p *clientPool) handleBackpressure(state common.BackpressureState) {
+	oldState := common.BackpressureState(atomic.SwapInt32(&p.backpressureState, int32(state)))
+
+	if oldState == state {
+		return // 状态未变化
+	}
+
+	switch state {
+	case common.BackpressureNormal:
+		// 恢复正常，唤醒所有等待的写入
+		p.backpressureCond.Broadcast()
+		log.Printf("[客户端] 背压恢复，继续正常发送")
+
+	case common.BackpressureSlowDown:
+		log.Printf("[客户端] 收到减速通知，降低发送速率")
+
+	case common.BackpressurePause:
+		log.Printf("[客户端] 收到暂停通知，等待恢复")
+	}
+}
+
+// waitForBackpressure 等待背压恢复正常（用于暂停状态）
+// 返回 true 表示可以继续，false 表示应该放弃
+func (p *clientPool) waitForBackpressure() bool {
+	state := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+
+	// 如果处于暂停状态，等待恢复
+	if state == common.BackpressurePause {
+		p.backpressureMu.Lock()
+		for atomic.LoadInt32(&p.backpressureState) == int32(common.BackpressurePause) {
+			// 检查 context 是否已取消
+			select {
+			case <-p.ctx.Done():
+				p.backpressureMu.Unlock()
+				return false
+			default:
+			}
+			p.backpressureCond.Wait()
+		}
+		p.backpressureMu.Unlock()
+	}
+
+	return true
+}
+
+// getBackpressureDelay 获取背压延迟（用于减速状态）
+func (p *clientPool) getBackpressureDelay() time.Duration {
+	state := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+
+	switch state {
+	case common.BackpressureSlowDown:
+		return 10 * time.Millisecond // 减速时增加延迟
+	case common.BackpressurePause:
+		return -1 // 需要等待
+	default:
+		return 0 // 正常，无延迟
 	}
 }

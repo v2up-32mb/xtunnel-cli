@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -26,17 +28,25 @@ type serverPool struct {
 	chConns map[int]*ServerWSConn
 
 	nextChID int
+
+	// 背压控制
+	globalQueueBytes     int64 // 全局队列字节数
+	globalQueueLimit     int64 // 全局队列字节限制
+	backpressureState    int32 // 当前背压状态 (atomic)
+	backpressureCooldown int32 // 背压通知冷却 (atomic)
 }
 
 // newServerPool 创建新的服务端连接池
 func newServerPool(token string, config *Config) *serverPool {
 	return &serverPool{
-		config:   config,
-		token:    token,
-		conns:    make(map[string]*ServerConnState),
-		wsConns:  make([]*ServerWSConn, 0),
-		chConns:  make(map[int]*ServerWSConn),
-		nextChID: 1,
+		config:            config,
+		token:             token,
+		conns:             make(map[string]*ServerConnState),
+		wsConns:           make([]*ServerWSConn, 0),
+		chConns:           make(map[int]*ServerWSConn),
+		nextChID:          1,
+		globalQueueLimit:  int64(config.ReadBufferSize) * 8,
+		backpressureState: int32(common.BackpressureNormal),
 	}
 }
 
@@ -96,7 +106,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		chID:      chID,
 		clientID:  clientID,
 		pool:      p,
-		writeChan: make(chan writeTask, 1024),
+		writeChan: make(chan writeTask, 4096),
 	}
 
 	// 存储 WebSocket 连接
@@ -317,6 +327,86 @@ func (p *serverPool) Stats() *ServerStats {
 	for _, wsConn := range p.wsConns {
 		if wsConn != nil && !wsConn.closed {
 			activeConns++
+		}
+	}
+
+	return &ServerStats{
+		ActiveConnections: activeConns,
+		ActiveChannels:    activeConns,
+		TotalConnections:  int64(len(p.conns)),
+	}
+}
+
+// addQueueBytes 增加全局队列字节数并检查背压
+func (p *serverPool) addQueueBytes(size int) {
+	newSize := atomic.AddInt64(&p.globalQueueBytes, int64(size))
+	limit := p.globalQueueLimit
+
+	// 检查是否需要发送背压通知（高水位：80%）
+	if newSize > limit*8/10 {
+		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+		// 避免重复发送背压通知
+		if currentState == common.BackpressureNormal {
+			// 使用冷却机制避免频繁发送
+			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
+				atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
+				p.broadcastBackpressure(common.BackpressureSlowDown)
+				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes)", newSize, limit)
+				// 设置冷却期
+				go func() {
+					time.Sleep(1 * time.Second)
+					atomic.StoreInt32(&p.backpressureCooldown, 0)
+				}()
+			}
+		}
+	}
+
+	// 检查是否需要暂停（超高水位：95%）
+	if newSize > limit*95/100 {
+		if common.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != common.BackpressurePause {
+			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressurePause))
+			p.broadcastBackpressure(common.BackpressurePause)
+			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes)", newSize, limit)
+		}
+	}
+}
+
+// removeQueueBytes 减少全局队列字节数并检查恢复
+func (p *serverPool) removeQueueBytes(size int) {
+	newSize := atomic.AddInt64(&p.globalQueueBytes, -int64(size))
+	if newSize < 0 {
+		atomic.StoreInt64(&p.globalQueueBytes, 0)
+		newSize = 0
+	}
+	limit := p.globalQueueLimit
+
+	// 检查是否可以恢复正常（低水位：30%）
+	if newSize < limit*3/10 {
+		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+		if currentState != common.BackpressureNormal {
+			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
+			p.broadcastBackpressure(common.BackpressureNormal)
+			log.Printf("[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes)", newSize, limit)
+		}
+	}
+}
+
+// broadcastBackpressure 广播背压状态到所有通道
+func (p *serverPool) broadcastBackpressure(state common.BackpressureState) {
+	meta := []byte{byte(state)}
+	msg := common.EncodeMessage(common.MsgBackpressure, "", meta, nil)
+	_ = p.broadcastWrite(websocket.BinaryMessage, msg)
+}
+
+// Stats 返回统计信息
+func (p *serverPool) Stats() *ServerStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	activeConns := 0
+	for _, wsConn := range p.wsConns {
+		if wsConn != nil && !wsConn.closed {
+		activeConns++
 		}
 	}
 
