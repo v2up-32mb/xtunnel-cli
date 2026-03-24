@@ -1053,17 +1053,28 @@ func (p *clientPool) waitForBackpressure() bool {
 	// 如果处于暂停状态，等待恢复
 	if state == common.BackpressurePause {
 		p.backpressureMu.Lock()
+		defer p.backpressureMu.Unlock()
+
+		// 启动一个 goroutine 在 context 取消时广播
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-p.ctx.Done():
+				p.backpressureCond.Broadcast()
+			case <-done:
+			}
+		}()
+		defer close(done)
+
 		for atomic.LoadInt32(&p.backpressureState) == int32(common.BackpressurePause) {
 			// 检查 context 是否已取消
 			select {
 			case <-p.ctx.Done():
-				p.backpressureMu.Unlock()
 				return false
 			default:
 			}
 			p.backpressureCond.Wait()
 		}
-		p.backpressureMu.Unlock()
 	}
 
 	return true
