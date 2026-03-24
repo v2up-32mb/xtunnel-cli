@@ -21,6 +21,16 @@ const (
 	MsgConnStatus
 	MsgSelectUplink
 	MsgSelectDownlink
+	MsgBackpressure
+)
+
+// BackpressureState 背压状态
+type BackpressureState uint8
+
+const (
+	BackpressureNormal   BackpressureState = 0 // 恢复正常
+	BackpressureSlowDown BackpressureState = 1 // 减速
+	BackpressurePause    BackpressureState = 2 // 暂停
 )
 
 // ConnStatus 连接状态

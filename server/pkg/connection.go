@@ -15,6 +15,7 @@ import (
 type writeTask struct {
 	msgType int
 	data    []byte
+	size    int
 }
 
 // ServerConnState 服务端连接状态
@@ -104,11 +105,34 @@ func (wsConn *ServerWSConn) writeLoop() {
 	ticker := time.NewTicker(wsConn.pool.config.PingInterval)
 	defer ticker.Stop()
 
+	// 退出时回收队列字节
+	defer func() {
+		if wsConn.writeChan != nil {
+			for {
+				select {
+				case task, ok := <-wsConn.writeChan:
+					if !ok {
+						return
+					}
+					if task.size > 0 {
+						wsConn.pool.removeQueueBytes(task.size)
+					}
+				default:
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case task, ok := <-wsConn.writeChan:
 			if !ok {
 				return
+			}
+			// 写入前减少队列字节计数
+			if task.size > 0 {
+				wsConn.pool.removeQueueBytes(task.size)
 			}
 			if err := wsConn.writeDirect(task.msgType, task.data); err != nil {
 				log.Printf("[服务端] 通道 %d 写消息失败: %v", wsConn.chID, err)
@@ -127,16 +151,24 @@ func (wsConn *ServerWSConn) writeLoop() {
 
 // asyncWrite 异步写入
 func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
+	size := len(data)
+
 	wsConn.mu.Lock()
 	if wsConn.closed {
 		wsConn.mu.Unlock()
 		return nil
 	}
+
+	// 检查并增加队列字节，同时检测背压
+	wsConn.pool.addQueueBytes(size)
+
 	select {
-	case wsConn.writeChan <- writeTask{msgType: msgType, data: data}:
+	case wsConn.writeChan <- writeTask{msgType: msgType, data: data, size: size}:
 		wsConn.mu.Unlock()
 		return nil
 	default:
+		// 队列满，回退字节计数
+		wsConn.pool.removeQueueBytes(size)
 		wsConn.mu.Unlock()
 		return fmt.Errorf("写队列满")
 	}
