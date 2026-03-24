@@ -397,22 +397,3 @@ func (p *serverPool) broadcastBackpressure(state common.BackpressureState) {
 	msg := common.EncodeMessage(common.MsgBackpressure, "", meta, nil)
 	_ = p.broadcastWrite(websocket.BinaryMessage, msg)
 }
-
-// Stats 返回统计信息
-func (p *serverPool) Stats() *ServerStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	activeConns := 0
-	for _, wsConn := range p.wsConns {
-		if wsConn != nil && !wsConn.closed {
-		activeConns++
-		}
-	}
-
-	return &ServerStats{
-		ActiveConnections: activeConns,
-		ActiveChannels:    activeConns,
-		TotalConnections:  int64(len(p.conns)),
-	}
-}
