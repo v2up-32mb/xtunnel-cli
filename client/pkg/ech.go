@@ -33,7 +33,8 @@ type ECHManager struct {
 	refreshMu    sync.Mutex
 	refreshTimer *time.Ticker // 定期刷新定时器
 	stopChan     chan struct{} // 停止信号通道
-	lastRefresh  time.Time    // 最后刷新时间
+	stopped      bool          // 防止重复关闭
+	lastRefresh  time.Time     // 最后刷新时间
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
@@ -157,6 +158,10 @@ func (m *ECHManager) Start() error {
 }
 
 func (m *ECHManager) Stop() {
+	if m.stopped {
+		return
+	}
+	m.stopped = true
 	if m.refreshTimer != nil {
 		m.refreshTimer.Stop()
 	}
@@ -224,7 +229,8 @@ func (m *ECHManager) queryDNSUDP(domain, dnsServer string) (string, error) {
 	}
 	query := buildDNSQuery(domain, typeHTTPS)
 
-	conn, err := net.Dial("udp", dnsServer)
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(m.ctx, "udp", dnsServer)
 	if err != nil {
 		return "", fmt.Errorf("连接 DNS 服务器失败: %v", err)
 	}
@@ -236,15 +242,35 @@ func (m *ECHManager) queryDNSUDP(domain, dnsServer string) (string, error) {
 		return "", fmt.Errorf("发送查询失败: %v", err)
 	}
 
-	response := make([]byte, 4096)
-	n, err := conn.Read(response)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return "", fmt.Errorf("DNS 查询超时")
-		}
-		return "", fmt.Errorf("读取 DNS 响应失败: %v", err)
+	type queryResult struct {
+		data string
+		err  error
 	}
-	return parseDNSResponse(response[:n])
+	resultCh := make(chan queryResult, 1)
+	go func() {
+		response := make([]byte, 4096)
+		n, readErr := conn.Read(response)
+		if readErr != nil {
+			resultCh <- queryResult{"", readErr}
+			return
+		}
+		parsed, parseErr := parseDNSResponse(response[:n])
+		resultCh <- queryResult{parsed, parseErr}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			if netErr, ok := res.err.(net.Error); ok && netErr.Timeout() {
+				return "", fmt.Errorf("DNS 查询超时")
+			}
+			return "", fmt.Errorf("读取 DNS 响应失败: %v", res.err)
+		}
+		return res.data, nil
+	case <-m.ctx.Done():
+		_ = conn.Close()
+		return "", m.ctx.Err()
+	}
 }
 
 func (m *ECHManager) queryDoH(domain, dohURL string) (string, error) {
@@ -258,7 +284,7 @@ func (m *ECHManager) queryDoH(domain, dohURL string) (string, error) {
 	q.Set("dns", dnsBase64)
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequestWithContext(m.ctx, "GET", u.String(), nil)
 	if err != nil {
 		return "", err
 	}

@@ -36,6 +36,10 @@ type Config struct {
 	// 缓冲区配置
 	ReadBufferSize  int // 读缓冲区大小
 	WriteBufferSize int // 写缓冲区大小
+
+	// 接入限制
+	MaxTotalChannels     int // 最大总通道数（0 表示无限制）
+	MaxChannelsPerClient int // 每个客户端最大通道数（0 表示无限制）
 }
 
 // DefaultConfig 返回带有合理默认值的配置
@@ -50,6 +54,8 @@ func DefaultConfig() *Config {
 		HandshakeTimeout: 5 * time.Second,
 		ReadBufferSize:   64 * 1024,
 		WriteBufferSize:  64 * 1024,
+		MaxTotalChannels: 0,
+		MaxChannelsPerClient: 0,
 	}
 }
 
@@ -60,6 +66,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Token == "" {
 		return ErrEmptyToken
+	}
+	if c.MaxTotalChannels < 0 || c.MaxChannelsPerClient < 0 {
+		return errors.New("channel limits cannot be negative")
 	}
 	return nil
 }

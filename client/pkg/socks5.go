@@ -54,6 +54,25 @@ type udpAssociation struct {
 	channelID int
 }
 
+func containsSOCKS5Method(methods []byte, want byte) bool {
+	for _, method := range methods {
+		if method == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *udpAssociation) notifyDone() {
+	if a.done == nil {
+		return
+	}
+	select {
+	case a.done <- true:
+	default:
+	}
+}
+
 // handleUDPResponse 处理 UDP 响应
 func (a *udpAssociation) handleUDPResponse(addrStr string, data []byte) {
 	host, portStr, _ := net.SplitHostPort(addrStr)
@@ -83,6 +102,8 @@ func (a *udpAssociation) Close() {
 	connID := a.connID
 	a.closed = true
 	a.mu.Unlock()
+
+	a.notifyDone()
 
 	if closedHadReceiving {
 		if chID >= 0 {
@@ -144,7 +165,7 @@ func (p *clientPool) ListenSOCKS5(addr string) error {
 func (p *clientPool) handleSOCKS5(c net.Conn, cfgp *ProxyConfig) {
 	defer c.Close()
 
-	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(p.proxyHandshakeTimeout()))
 
 	// VER, NMETHODS
 	buf := make([]byte, 2)
@@ -152,15 +173,25 @@ func (p *clientPool) handleSOCKS5(c net.Conn, cfgp *ProxyConfig) {
 		return
 	}
 	methods := make([]byte, buf[1])
-	_, _ = io.ReadFull(c, methods)
+	if _, err := io.ReadFull(c, methods); err != nil {
+		return
+	}
 
 	// METHOD selection
 	if cfgp.Username != "" {
+		if !containsSOCKS5Method(methods, 0x02) {
+			_, _ = c.Write([]byte{0x05, 0xFF})
+			return
+		}
 		_, _ = c.Write([]byte{0x05, 0x02}) // username/password
 		if err := p.handleSOCKS5UserPassAuth(c, cfgp); err != nil {
 			return
 		}
 	} else {
+		if !containsSOCKS5Method(methods, 0x00) {
+			_, _ = c.Write([]byte{0x05, 0xFF})
+			return
+		}
 		_, _ = c.Write([]byte{0x05, 0x00}) // no auth
 	}
 
@@ -169,29 +200,44 @@ func (p *clientPool) handleSOCKS5(c net.Conn, cfgp *ProxyConfig) {
 	if _, err := io.ReadFull(c, head); err != nil {
 		return
 	}
+	if head[0] != 0x05 || head[2] != 0x00 {
+		_, _ = c.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
 
 	var target string
 	switch head[3] {
 	case 0x01: // IPv4
 		b := make([]byte, 4)
-		_, _ = io.ReadFull(c, b)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
 		target = net.IP(b).String()
 	case 0x03: // DOMAIN
 		b := make([]byte, 1)
-		_, _ = io.ReadFull(c, b)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
 		addr := make([]byte, b[0])
-		_, _ = io.ReadFull(c, addr)
+		if _, err := io.ReadFull(c, addr); err != nil {
+			return
+		}
 		target = string(addr)
 	case 0x04: // IPv6
 		b := make([]byte, 16)
-		_, _ = io.ReadFull(c, b)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
 		target = net.IP(b).String()
 	default:
+		_, _ = c.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 
 	pb := make([]byte, 2)
-	_, _ = io.ReadFull(c, pb)
+	if _, err := io.ReadFull(c, pb); err != nil {
+		return
+	}
 	port := int(pb[0])<<8 | int(pb[1])
 
 	if head[3] == 0x04 {
@@ -218,12 +264,24 @@ func (p *clientPool) handleSOCKS5(c net.Conn, cfgp *ProxyConfig) {
 func (p *clientPool) handleSOCKS5UserPassAuth(c net.Conn, cfgp *ProxyConfig) error {
 	// RFC1929: VER=1, ULEN, UNAME, PLEN, PASSWD
 	b := make([]byte, 2)
-	_, _ = io.ReadFull(c, b) // VER, ULEN
+	if _, err := io.ReadFull(c, b); err != nil {
+		return err
+	}
+	if b[0] != 0x01 {
+		_, _ = c.Write([]byte{0x01, 0x01})
+		return errors.New("认证版本无效")
+	}
 	u := make([]byte, b[1])
-	_, _ = io.ReadFull(c, u)
-	_, _ = io.ReadFull(c, b[:1]) // PLEN
+	if _, err := io.ReadFull(c, u); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(c, b[:1]); err != nil {
+		return err
+	}
 	pswd := make([]byte, b[0])
-	_, _ = io.ReadFull(c, pswd)
+	if _, err := io.ReadFull(c, pswd); err != nil {
+		return err
+	}
 
 	if string(u) == cfgp.Username && string(pswd) == cfgp.Password {
 		_, _ = c.Write([]byte{0x01, 0x00})
@@ -260,7 +318,7 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 		select {
 		case <-connected:
 			// 连接成功，继续正常处理
-		case <-time.After(15 * time.Second):
+		case <-time.After(p.connectTimeout()):
 			// 连接超时，发送错误响应并关闭连接
 			log.Printf("[客户端] SOCKS5 连接 %s 超时", target)
 			_, _ = c.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -329,7 +387,7 @@ func (p *clientPool) handleSOCKS5UDP(c net.Conn, cfgp *ProxyConfig) {
 		tcpConn:     c,
 		udpListener: ul,
 		pool:        p,
-		done:        make(chan bool, 5),
+		done:        make(chan bool, 1),
 		channelID:   -1,
 	}
 	p.RegisterUDP(connID, assoc)
@@ -340,7 +398,7 @@ func (p *clientPool) handleSOCKS5UDP(c net.Conn, cfgp *ProxyConfig) {
 	b := make([]byte, 1)
 	for {
 		if _, err := c.Read(b); err != nil {
-			assoc.done <- true
+			assoc.notifyDone()
 			assoc.Close()
 			return
 		}
@@ -352,9 +410,15 @@ func (a *udpAssociation) loop() {
 	buf := make([]byte, 64*1024)
 
 	for {
+		select {
+		case <-a.done:
+			return
+		default:
+		}
+
 		n, addr, err := a.udpListener.ReadFromUDP(buf)
 		if err != nil {
-			a.done <- true
+			a.notifyDone()
 			return
 		}
 
@@ -435,7 +499,7 @@ func (a *udpAssociation) send(target string, data []byte) {
 // parseSOCKS5UDPPacket 解析 SOCKS5 UDP 数据包
 func parseSOCKS5UDPPacket(b []byte) (string, []byte, error) {
 	// RSV(2)=0, FRAG(1)=0
-	if len(b) < 10 || b[2] != 0 {
+	if len(b) < 10 || b[0] != 0 || b[1] != 0 || b[2] != 0 {
 		return "", nil, errors.New("数据不合法")
 	}
 	off := 4
@@ -482,6 +546,10 @@ func parseSOCKS5UDPPacket(b []byte) (string, []byte, error) {
 
 // buildSOCKS5UDPPacket 构建 SOCKS5 UDP 数据包
 func buildSOCKS5UDPPacket(h string, p int, d []byte) ([]byte, error) {
+	if p < 0 || p > 65535 {
+		return nil, errors.New("端口无效")
+	}
+
 	buf := []byte{0, 0, 0} // RSV(2), FRAG(1)
 	ip := net.ParseIP(h)
 	if ip4 := ip.To4(); ip4 != nil {

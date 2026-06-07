@@ -23,11 +23,11 @@ type writeJob struct {
 
 // clientConnState 客户端连接状态
 type clientConnState struct {
-	id            string
-	target        string
-	uplinkChID    int
-	downlinkChID  int
-	connected     chan bool
+	id           string
+	target       string
+	uplinkChID   int
+	downlinkChID int
+	connected    chan bool
 
 	// 内部使用字段
 	reqType    string
@@ -46,12 +46,14 @@ type clientPool struct {
 	globalQueueBytes int64
 	globalQueueLimit int64
 	nextChannel      uint64
+	bytesSent        uint64
+	bytesReceived    uint64
 
-	config        *Config
-	ctx           context.Context
-	cancel        context.CancelFunc
-	relayManager  *RelayNodeManager
-	echManager    *ECHManager
+	config       *Config
+	ctx          context.Context
+	cancel       context.CancelFunc
+	relayManager *RelayNodeManager
+	echManager   *ECHManager
 
 	wsConnsMu       sync.RWMutex
 	wsConns         []*websocket.Conn
@@ -65,7 +67,7 @@ type clientPool struct {
 	socks5Sem  chan struct{} // SOCKS5 连接信号量
 
 	// 背压控制
-	backpressureState int32     // 原子操作，背压状态
+	backpressureState int32      // 原子操作，背压状态
 	backpressureCond  *sync.Cond // 用于暂停/恢复
 	backpressureMu    sync.Mutex // Cond 的锁
 }
@@ -347,12 +349,45 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 	}
 }
 
+// reserveQueueBytes 预留写队列字节数，超限时不修改计数并返回 false
+func (p *clientPool) reserveQueueBytes(size int64) bool {
+	if size <= 0 {
+		return true
+	}
+	for {
+		current := atomic.LoadInt64(&p.globalQueueBytes)
+		if current+size > p.globalQueueLimit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&p.globalQueueBytes, current, current+size) {
+			return true
+		}
+	}
+}
+
+// releaseQueueBytes 释放写队列字节数，并保证计数不会小于 0
+func (p *clientPool) releaseQueueBytes(size int64) {
+	if size <= 0 {
+		return
+	}
+	for {
+		current := atomic.LoadInt64(&p.globalQueueBytes)
+		next := current - size
+		if next < 0 {
+			next = 0
+		}
+		if atomic.CompareAndSwapInt64(&p.globalQueueBytes, current, next) {
+			return
+		}
+	}
+}
+
 // writeWorker 写入协程
 func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJob) {
 	ticker := time.NewTicker(p.config.PingInterval)
 	defer ticker.Stop()
 
-	// 退出时尽量回收 globalQueueBytes
+	// 退出时尽量回收尚未处理的队列字节数
 	defer func() {
 		if queue != nil {
 			for {
@@ -361,7 +396,7 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 					if !ok {
 						return
 					}
-					atomic.AddInt64(&p.globalQueueBytes, int64(-j.size))
+					p.releaseQueueBytes(int64(j.size))
 				default:
 					return
 				}
@@ -370,11 +405,15 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 	}()
 
 	var pending *writeJob
+	pendingReleased := false
 	for {
 		var job writeJob
+		released := false
 		if pending != nil {
 			job = *pending
 			pending = nil
+			released = pendingReleased
+			pendingReleased = false
 		} else {
 			select {
 			case <-p.ctx.Done():
@@ -400,7 +439,9 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 			}
 		}
 
-		atomic.AddInt64(&p.globalQueueBytes, int64(-job.size))
+		if !released {
+			p.releaseQueueBytes(int64(job.size))
+		}
 
 		// 非二进制消息直接写
 		if job.msgType != websocket.BinaryMessage {
@@ -411,6 +452,7 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 				_ = conn.Close()
 				return
 			}
+			p.addSentBytes(len(job.data))
 			_ = conn.SetWriteDeadline(time.Time{})
 			p.connsWriteMutex[id].Unlock()
 			continue
@@ -426,6 +468,7 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 				_ = conn.Close()
 				return
 			}
+			p.addSentBytes(len(job.data))
 			_ = conn.SetWriteDeadline(time.Time{})
 			p.connsWriteMutex[id].Unlock()
 			continue
@@ -443,18 +486,21 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 					// 队列已关闭,正常退出
 					break AggLoop
 				}
-				// 注意:next.size 已在取出时扣除(line 341),此处不再重复扣除
+				p.releaseQueueBytes(int64(next.size))
 				if next.msgType != websocket.BinaryMessage {
 					pending = &next
+					pendingReleased = true
 					break AggLoop
 				}
 				tt, cid, mm, pl, e := common.DecodeMessage(next.data)
 				if e != nil || tt != common.MsgTCPData || cid != connID || len(mm) != 0 {
 					pending = &next
+					pendingReleased = true
 					break AggLoop
 				}
 				if total+len(pl) > maxAgg {
 					pending = &next
+					pendingReleased = true
 					break AggLoop
 				}
 				parts = append(parts, pl)
@@ -478,11 +524,13 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 
 		p.connsWriteMutex[id].Lock()
 		_ = conn.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
-		if err := conn.WriteMessage(websocket.BinaryMessage, common.EncodeMessage(common.MsgTCPData, connID, meta, merged)); err != nil {
+		encoded := common.EncodeMessage(common.MsgTCPData, connID, meta, merged)
+		if err := conn.WriteMessage(websocket.BinaryMessage, encoded); err != nil {
 			p.connsWriteMutex[id].Unlock()
 			_ = conn.Close()
 			return
 		}
+		p.addSentBytes(len(encoded))
 		_ = conn.SetWriteDeadline(time.Time{})
 		p.connsWriteMutex[id].Unlock()
 	}
@@ -508,24 +556,33 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 	}
 
 	size := int64(len(data))
-	if atomic.AddInt64(&p.globalQueueBytes, size) > p.globalQueueLimit {
-		atomic.AddInt64(&p.globalQueueBytes, -size)
+	if !p.reserveQueueBytes(size) {
 		return fmt.Errorf("全局写队列超限")
 	}
 
+	queue := p.writeQueues[idx]
+	if queue == nil {
+		p.releaseQueueBytes(size)
+		return fmt.Errorf("通道 %d 不可用", chID)
+	}
+
+	job := writeJob{msgType: msgType, data: data, size: int(size)}
 	select {
-	case p.writeQueues[idx] <- writeJob{msgType: msgType, data: data, size: int(size)}:
+	case queue <- job:
 		return nil
 	default:
 		timer := time.NewTimer(100 * time.Millisecond)
 		defer timer.Stop()
 		select {
-		case p.writeQueues[idx] <- writeJob{msgType: msgType, data: data, size: int(size)}:
+		case queue <- job:
 			return nil
 		case <-timer.C:
-			atomic.AddInt64(&p.globalQueueBytes, -size)
-			log.Printf("[客户端] 通道 %d 写队列满,队列长度: %d", chID, len(p.writeQueues[idx]))
+			p.releaseQueueBytes(size)
+			log.Printf("[客户端] 通道 %d 写队列满,队列长度: %d", chID, len(queue))
 			return fmt.Errorf("通道 %d 缓冲区拥堵", chID)
+		case <-p.ctx.Done():
+			p.releaseQueueBytes(size)
+			return fmt.Errorf("客户端正在关闭")
 		}
 	}
 }
@@ -533,22 +590,14 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 // broadcastWrite 广播写入所有通道
 func (p *clientPool) broadcastWrite(msgType int, data []byte) {
 	p.wsConnsMu.RLock()
-	sent := false
+	defer p.wsConnsMu.RUnlock()
+
 	for i, c := range p.wsConns {
 		if c == nil {
 			continue
 		}
 		_ = p.asyncWriteDirect(i+1, msgType, data)
-		sent = true
 	}
-	p.wsConnsMu.RUnlock()
-
-	if sent {
-		return
-	}
-	// 没有可用连接:仍丢入某个通道队列,等待其重连后发送（队列可能积压/丢弃由限额控制）
-	idx := int(atomic.AddUint64(&p.nextChannel, 1)) % len(p.writeQueues)
-	_ = p.asyncWriteDirect(idx+1, msgType, data)
 }
 
 // noteUplink 记录上行通道
@@ -713,17 +762,20 @@ func (p *clientPool) Unregister(connID string) {
 		target = "-"
 	}
 
+	tcpConn := st.tcpConn
+	udpAssoc := st.udpAssoc
+	delete(p.conns, connID)
+	p.mu.Unlock()
+
 	log.Printf("[客户端] %s %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		client, typ, target, u, d, common.ShortID(connID))
 
-	if st.tcpConn != nil {
-		_ = st.tcpConn.Close()
+	if tcpConn != nil {
+		_ = tcpConn.Close()
 	}
-	if st.udpAssoc != nil {
-		st.udpAssoc.Close()
+	if udpAssoc != nil {
+		udpAssoc.Close()
 	}
-	delete(p.conns, connID)
-	p.mu.Unlock()
 }
 
 // selectDownlink 选择下行通道
@@ -750,6 +802,32 @@ func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, cho
 	}
 	typ = st.reqType
 	return
+}
+
+func (p *clientPool) connectTimeout() time.Duration {
+	if p == nil || p.config == nil || p.config.ConnectTimeout <= 0 {
+		return 15 * time.Second
+	}
+	return p.config.ConnectTimeout
+}
+
+func (p *clientPool) addSentBytes(n int) {
+	if n > 0 {
+		atomic.AddUint64(&p.bytesSent, uint64(n))
+	}
+}
+
+func (p *clientPool) addReceivedBytes(n int) {
+	if n > 0 {
+		atomic.AddUint64(&p.bytesReceived, uint64(n))
+	}
+}
+
+func (p *clientPool) proxyHandshakeTimeout() time.Duration {
+	if p == nil || p.config == nil || p.config.HandshakeTimeout <= 0 {
+		return 3 * time.Second
+	}
+	return p.config.HandshakeTimeout
 }
 
 // signalConnected 发送连接成功信号
@@ -851,6 +929,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 		if mt != websocket.BinaryMessage {
 			continue
 		}
+		p.addReceivedBytes(len(msg))
 		mtype, connID, meta, payload, err := common.DecodeMessage(msg)
 		if err != nil {
 			continue
@@ -915,7 +994,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			}
 			p.mu.RUnlock()
 			if c != nil {
-				_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_ = c.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
 				if _, err := c.Write(payload); err != nil {
 					_ = p.SendCloseDirect(chID, connID)
 					_ = c.Close()
@@ -1020,6 +1099,8 @@ func (p *clientPool) Stats() *Stats {
 		Connections:    len(p.conns),
 		ActiveChannels: activeChannels,
 		RelayNodes:     relayNodes,
+		BytesSent:      atomic.LoadUint64(&p.bytesSent),
+		BytesReceived:  atomic.LoadUint64(&p.bytesReceived),
 	}
 }
 

@@ -90,6 +90,11 @@ func (c *Client) ListenSOCKS5(addr string) error {
 	return c.pool.ListenSOCKS5(addr)
 }
 
+// ListenHTTP 启动 HTTP Proxy 监听器
+func (c *Client) ListenHTTP(addr string) error {
+	return c.pool.ListenHTTP(addr)
+}
+
 // Stats 返回客户端统计信息
 func (c *Client) Stats() *Stats {
 	return c.pool.Stats()
