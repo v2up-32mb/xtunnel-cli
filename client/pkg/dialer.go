@@ -11,6 +11,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var dialWebSocketRetryDelay = time.Second
+
 // dialWebSocket 建立 WebSocket 连接（支持 ECH 和中转节点）
 func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, error) {
 	u, err := url.Parse(p.config.ServerAddr)
@@ -23,7 +25,8 @@ func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, e
 
 	dialURL := *u
 	q := dialURL.Query()
-	// 告诉服务端期望的通道 ID
+	// 告诉服务端期望的客户端 ID 和通道 ID
+	q.Set("client_id", p.clientID)
 	q.Set("ch_id", fmt.Sprintf("%d", chID))
 	dialURL.RawQuery = q.Encode()
 	dialAddr := dialURL.String()
@@ -39,7 +42,11 @@ func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, e
 			if i < maxRetries && p.config.EnableECH {
 				// ECH 失败时尝试刷新配置
 				_ = p.echManager.Refresh()
-				time.Sleep(1 * time.Second)
+				select {
+				case <-p.ctx.Done():
+					return nil, p.ctx.Err()
+				case <-time.After(dialWebSocketRetryDelay):
+				}
 				continue
 			}
 			return nil, err
@@ -79,7 +86,11 @@ func (p *clientPool) dialWebSocket(chID int, relayIP string) (*websocket.Conn, e
 			// ECH 相关错误时重试
 			if p.config.EnableECH && (strings.Contains(err.Error(), "ECH") || strings.Contains(err.Error(), "ech")) && i < maxRetries {
 				_ = p.echManager.Refresh()
-				time.Sleep(1 * time.Second)
+				select {
+				case <-p.ctx.Done():
+					return nil, p.ctx.Err()
+				case <-time.After(dialWebSocketRetryDelay):
+				}
 				continue
 			}
 			return nil, err

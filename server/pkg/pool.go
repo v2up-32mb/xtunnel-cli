@@ -102,11 +102,12 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wsConn := &ServerWSConn{
-		ws:        ws,
-		chID:      chID,
-		clientID:  clientID,
-		pool:      p,
-		writeChan: make(chan writeTask, 4096),
+		ws:         ws,
+		chID:       chID,
+		clientID:   clientID,
+		remoteAddr: ws.RemoteAddr().String(),
+		pool:       p,
+		writeChan:  make(chan writeTask, 4096),
 	}
 
 	// 存储 WebSocket 连接
@@ -396,23 +397,4 @@ func (p *serverPool) broadcastBackpressure(state common.BackpressureState) {
 	meta := []byte{byte(state)}
 	msg := common.EncodeMessage(common.MsgBackpressure, "", meta, nil)
 	_ = p.broadcastWrite(websocket.BinaryMessage, msg)
-}
-
-// Stats 返回统计信息
-func (p *serverPool) Stats() *ServerStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	activeConns := 0
-	for _, wsConn := range p.wsConns {
-		if wsConn != nil && !wsConn.closed {
-		activeConns++
-		}
-	}
-
-	return &ServerStats{
-		ActiveConnections: activeConns,
-		ActiveChannels:    activeConns,
-		TotalConnections:  int64(len(p.conns)),
-	}
 }

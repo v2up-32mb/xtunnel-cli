@@ -44,7 +44,7 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 		p.mu.RUnlock()
 		if wsConn != nil {
 			st.clientID = wsConn.clientID
-			st.clientAddr = wsConn.clientID
+			st.clientAddr = wsConn.remoteAddr
 		}
 
 		// 发送 MsgSelectUplink（广播）,携带上行通道ID
@@ -277,7 +277,7 @@ func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
 	p.mu.RUnlock()
 	if wsConn != nil {
 		st.clientID = wsConn.clientID
-		st.clientAddr = wsConn.clientID
+		st.clientAddr = wsConn.remoteAddr
 	}
 
 	// 发送 MsgSelectUplink（广播）,携带上行通道ID
