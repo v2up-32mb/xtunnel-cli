@@ -19,6 +19,8 @@ type serverPool struct {
 	config *Config
 	token  string
 	mu     sync.RWMutex
+	bytesSent     uint64
+	bytesReceived uint64
 
 	// 连接状态映射
 	conns map[string]*ServerConnState
@@ -50,13 +52,17 @@ func newServerPool(token string, config *Config) *serverPool {
 	}
 }
 
+// checkOrigin 是 WebSocket Origin 校验扩展点。
+// 当前默认保持兼容行为：允许所有来源。
+func checkOrigin(r *http.Request) bool {
+	return true
+}
+
 // upgrader WebSocket 升级器
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  64 * 1024,
 	WriteBufferSize: 64 * 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	CheckOrigin:     checkOrigin,
 }
 
 // handleWebSocket 处理 WebSocket 连接
@@ -93,6 +99,18 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 	}
 
+	totalActive, clientActive := p.countActiveChannels(clientID)
+	if p.config.MaxTotalChannels > 0 && totalActive >= p.config.MaxTotalChannels {
+		log.Printf("[服务端] 拒绝客户端 %s:总通道数已达上限 %d", clientID, p.config.MaxTotalChannels)
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	if p.config.MaxChannelsPerClient > 0 && clientActive >= p.config.MaxChannelsPerClient {
+		log.Printf("[服务端] 拒绝客户端 %s:客户端通道数已达上限 %d", clientID, p.config.MaxChannelsPerClient)
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+
 	// 升级为 WebSocket
 	upgrader.Subprotocols = []string{p.token}
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -109,8 +127,17 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		writeChan: make(chan writeTask, 4096),
 	}
 
-	// 存储 WebSocket 连接
+	// 存储 WebSocket 连接（再次校验上限，避免并发窗口超限）
 	p.mu.Lock()
+	totalActive, clientActive = p.countActiveChannelsLocked(clientID)
+	if (p.config.MaxTotalChannels > 0 && totalActive >= p.config.MaxTotalChannels) ||
+		(p.config.MaxChannelsPerClient > 0 && clientActive >= p.config.MaxChannelsPerClient) {
+		p.mu.Unlock()
+		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "channel limit reached"), time.Now().Add(p.config.WriteTimeout))
+		_ = ws.Close()
+		log.Printf("[服务端] 客户端 %s 在升级后命中通道上限，已关闭新通道", clientID)
+		return
+	}
 	// 扩展切片
 	for chID > len(p.wsConns) {
 		p.wsConns = append(p.wsConns, nil)
@@ -134,8 +161,54 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[服务端] 通道 %d 已断开", chID)
 }
 
+func (p *serverPool) countActiveChannels(clientID string) (total int, clientTotal int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.countActiveChannelsLocked(clientID)
+}
+
+func (p *serverPool) countActiveChannelsLocked(clientID string) (total int, clientTotal int) {
+	for _, wsConn := range p.wsConns {
+		if wsConn == nil || wsConn.closed {
+			continue
+		}
+		total++
+		if wsConn.clientID == clientID {
+			clientTotal++
+		}
+	}
+	return
+}
+
+func (p *serverPool) connectTimeout() time.Duration {
+	if p == nil || p.config == nil || p.config.HandshakeTimeout <= 0 {
+		return 10 * time.Second
+	}
+	return p.config.HandshakeTimeout
+}
+
+func (p *serverPool) udpReadTimeout() time.Duration {
+	if p == nil || p.config == nil || p.config.ReadTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return p.config.ReadTimeout * 2
+}
+
+func (p *serverPool) addSentBytes(n int) {
+	if n > 0 {
+		atomic.AddUint64(&p.bytesSent, uint64(n))
+	}
+}
+
+func (p *serverPool) addReceivedBytes(n int) {
+	if n > 0 {
+		atomic.AddUint64(&p.bytesReceived, uint64(n))
+	}
+}
+
 // handleMessage 处理消息
 func (p *serverPool) handleMessage(chID int, msgType common.MessageType, connID string, meta, payload []byte) {
+	p.addReceivedBytes(len(common.EncodeMessage(msgType, connID, meta, payload)))
 	switch msgType {
 	case common.MsgTCPConnect:
 		p.handleTCPConnect(chID, connID, meta)
@@ -172,6 +245,7 @@ func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, met
 
 	st.mu.RLock()
 	downlink := st.downlinkChID
+	clientID := st.clientID
 	st.mu.RUnlock()
 
 	if downlink > 0 {
@@ -179,20 +253,29 @@ func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, met
 		return p.sendToChannel(downlink, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
 	}
 
-	// 未选择:广播
-	return p.broadcastWrite(websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
+	// 未选择:只广播给同一客户端的活跃通道
+	return p.broadcastWriteToClient(clientID, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
 }
 
 // broadcastWrite 广播写入所有通道
 func (p *serverPool) broadcastWrite(msgType int, data []byte) error {
+	return p.broadcastWriteToClient("", msgType, data)
+}
+
+// broadcastWriteToClient 广播写入指定客户端的活跃通道；clientID 为空时表示全量广播
+func (p *serverPool) broadcastWriteToClient(clientID string, msgType int, data []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	var activeConns []*ServerWSConn
 	for _, wsConn := range p.wsConns {
-		if wsConn != nil && !wsConn.closed {
-			activeConns = append(activeConns, wsConn)
+		if wsConn == nil || wsConn.closed {
+			continue
 		}
+		if clientID != "" && wsConn.clientID != clientID {
+			continue
+		}
+		activeConns = append(activeConns, wsConn)
 	}
 
 	if len(activeConns) == 0 {
@@ -252,16 +335,17 @@ func (p *serverPool) cleanupChannel(chID int) {
 		wsConn.mu.Lock()
 		if !wsConn.closed {
 			wsConn.closed = true
-			// 安全关闭channel
-			if wsConn.writeChan != nil {
-				select {
-				case <-wsConn.writeChan:
-					// channel已经关闭
-				default:
-					close(wsConn.writeChan)
-				}
+			writeChan := wsConn.writeChan
+			wsConn.writeChan = nil
+			ws := wsConn.ws
+			wsConn.mu.Unlock()
+			if writeChan != nil {
+				close(writeChan)
 			}
-			wsConn.ws.Close()
+			if ws != nil {
+				_ = ws.Close()
+			}
+			return
 		}
 		wsConn.mu.Unlock()
 	}
@@ -334,39 +418,54 @@ func (p *serverPool) Stats() *ServerStats {
 		ActiveConnections: activeConns,
 		ActiveChannels:    activeConns,
 		TotalConnections:  int64(len(p.conns)),
+		BytesSent:         atomic.LoadUint64(&p.bytesSent),
+		BytesReceived:     atomic.LoadUint64(&p.bytesReceived),
 	}
 }
 
-// addQueueBytes 增加全局队列字节数并检查背压
-func (p *serverPool) addQueueBytes(size int) {
-	newSize := atomic.AddInt64(&p.globalQueueBytes, int64(size))
-	limit := p.globalQueueLimit
+// addQueueBytes 增加全局队列字节数
+func (p *serverPool) addQueueBytes(size int) int64 {
+	return atomic.AddInt64(&p.globalQueueBytes, int64(size))
+}
 
-	// 检查是否需要发送背压通知（高水位：80%）
-	if newSize > limit*8/10 {
-		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
-		// 避免重复发送背压通知
-		if currentState == common.BackpressureNormal {
-			// 使用冷却机制避免频繁发送
-			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
-				atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
-				p.broadcastBackpressure(common.BackpressureSlowDown)
-				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes)", newSize, limit)
-				// 设置冷却期
-				go func() {
-					time.Sleep(1 * time.Second)
-					atomic.StoreInt32(&p.backpressureCooldown, 0)
-				}()
-			}
-		}
+// rollbackQueueBytes 回退尚未成功入队的字节数
+func (p *serverPool) rollbackQueueBytes(size int) int64 {
+	newSize := atomic.AddInt64(&p.globalQueueBytes, -int64(size))
+	if newSize < 0 {
+		atomic.StoreInt64(&p.globalQueueBytes, 0)
+		return 0
+	}
+	return newSize
+}
+
+// updateBackpressureState 根据当前队列水位更新背压状态
+func (p *serverPool) updateBackpressureState(newSize int64) {
+	limit := p.globalQueueLimit
+	if limit <= 0 {
+		return
 	}
 
-	// 检查是否需要暂停（超高水位：95%）
 	if newSize > limit*95/100 {
 		if common.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != common.BackpressurePause {
 			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressurePause))
 			p.broadcastBackpressure(common.BackpressurePause)
 			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes)", newSize, limit)
+		}
+		return
+	}
+
+	if newSize > limit*8/10 {
+		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+		if currentState == common.BackpressureNormal {
+			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
+				atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
+				p.broadcastBackpressure(common.BackpressureSlowDown)
+				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes)", newSize, limit)
+				go func() {
+					time.Sleep(1 * time.Second)
+					atomic.StoreInt32(&p.backpressureCooldown, 0)
+				}()
+			}
 		}
 	}
 }
@@ -379,6 +478,10 @@ func (p *serverPool) removeQueueBytes(size int) {
 		newSize = 0
 	}
 	limit := p.globalQueueLimit
+
+	if limit <= 0 {
+		return
+	}
 
 	// 检查是否可以恢复正常（低水位：30%）
 	if newSize < limit*3/10 {
@@ -396,23 +499,4 @@ func (p *serverPool) broadcastBackpressure(state common.BackpressureState) {
 	meta := []byte{byte(state)}
 	msg := common.EncodeMessage(common.MsgBackpressure, "", meta, nil)
 	_ = p.broadcastWrite(websocket.BinaryMessage, msg)
-}
-
-// Stats 返回统计信息
-func (p *serverPool) Stats() *ServerStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	activeConns := 0
-	for _, wsConn := range p.wsConns {
-		if wsConn != nil && !wsConn.closed {
-		activeConns++
-		}
-	}
-
-	return &ServerStats{
-		ActiveConnections: activeConns,
-		ActiveChannels:    activeConns,
-		TotalConnections:  int64(len(p.conns)),
-	}
 }

@@ -30,6 +30,7 @@ type Config struct {
 	WriteTimeout     time.Duration // 写超时
 	PingInterval     time.Duration // Ping 间隔
 	ReconnectDelay   time.Duration // 重连延迟
+	ConnectTimeout   time.Duration // 本地代理等待远端建链超时
 
 	// ECH 配置
 	EnableECH          bool          // 是否启用 ECH
@@ -64,6 +65,7 @@ func DefaultConfig() *Config {
 		WriteTimeout:      5 * time.Second,
 		PingInterval:      5 * time.Second,
 		ReconnectDelay:    1 * time.Second,
+		ConnectTimeout:    15 * time.Second,
 		EnableECH:         true,
 		ECHDomain:         "cloudflare-ech.com",
 		DNSServer:         "https://doh.pub/dns-query",
@@ -85,8 +87,11 @@ func (c *Config) Validate() error {
 		return ErrInvalidConnections
 	}
 
-	if c.DialTimeout <= 0 {
+	if c.DialTimeout <= 0 || c.HandshakeTimeout <= 0 || c.ReadTimeout <= 0 || c.WriteTimeout <= 0 || c.PingInterval <= 0 || c.ReconnectDelay <= 0 || c.ConnectTimeout <= 0 {
 		return ErrInvalidTimeout
+	}
+	if c.MaxSOCKS5Connections < 0 {
+		return errors.New("max socks5 connections cannot be negative")
 	}
 
 	return nil

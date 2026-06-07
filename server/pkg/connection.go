@@ -154,21 +154,21 @@ func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
 	size := len(data)
 
 	wsConn.mu.Lock()
-	if wsConn.closed {
+	if wsConn.closed || wsConn.writeChan == nil {
 		wsConn.mu.Unlock()
 		return nil
 	}
 
-	// 检查并增加队列字节，同时检测背压
-	wsConn.pool.addQueueBytes(size)
+	newSize := wsConn.pool.addQueueBytes(size)
+	queue := wsConn.writeChan
 
 	select {
-	case wsConn.writeChan <- writeTask{msgType: msgType, data: data, size: size}:
+	case queue <- writeTask{msgType: msgType, data: data, size: size}:
 		wsConn.mu.Unlock()
+		wsConn.pool.updateBackpressureState(newSize)
 		return nil
 	default:
-		// 队列满，回退字节计数
-		wsConn.pool.removeQueueBytes(size)
+		wsConn.pool.rollbackQueueBytes(size)
 		wsConn.mu.Unlock()
 		return fmt.Errorf("写队列满")
 	}
@@ -188,6 +188,7 @@ func (wsConn *ServerWSConn) writeDirect(msgType int, data []byte) error {
 		if err := wsConn.ws.WriteMessage(msgType, data); err != nil {
 			return err
 		}
+		wsConn.pool.addSentBytes(len(data))
 		_ = wsConn.ws.SetWriteDeadline(time.Time{})
 		return nil
 	}
@@ -196,6 +197,7 @@ func (wsConn *ServerWSConn) writeDirect(msgType int, data []byte) error {
 	if err := wsConn.ws.WriteMessage(msgType, data); err != nil {
 		return err
 	}
+	wsConn.pool.addSentBytes(len(data))
 	_ = wsConn.ws.SetWriteDeadline(time.Time{})
 	return nil
 }
@@ -208,20 +210,19 @@ func (wsConn *ServerWSConn) close() {
 		return
 	}
 	wsConn.closed = true
+	writeChan := wsConn.writeChan
+	wsConn.writeChan = nil
+	ws := wsConn.ws
 	wsConn.mu.Unlock()
 
-	_ = wsConn.ws.WriteMessage(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	_ = wsConn.ws.Close()
+	if ws != nil {
+		_ = ws.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = ws.Close()
+	}
 
-	// 安全关闭channel
-	if wsConn.writeChan != nil {
-		select {
-		case <-wsConn.writeChan:
-			// channel已经关闭
-		default:
-			close(wsConn.writeChan)
-		}
+	if writeChan != nil {
+		close(writeChan)
 	}
 
 	wsConn.pool.cleanupChannel(wsConn.chID)

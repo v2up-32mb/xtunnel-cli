@@ -66,11 +66,16 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 
 // connectTarget 连接目标服务器
 func (p *serverPool) connectTarget(st *ServerConnState) {
-	// IP 策略解析
+	st.mu.RLock()
+	if st.closed {
+		st.mu.RUnlock()
+		return
+	}
 	resolvedTarget := common.ResolveWithStrategy(st.target, st.ipStrategy)
+	st.mu.RUnlock()
 
 	// 连接到目标
-	conn, err := net.DialTimeout("tcp", resolvedTarget, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", resolvedTarget, p.connectTimeout())
 	if err != nil {
 		log.Printf("[服务端] 连接目标失败 %s: %v", st.target, err)
 		p.sendDownlink(st.connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
@@ -81,6 +86,11 @@ func (p *serverPool) connectTarget(st *ServerConnState) {
 	}
 
 	st.mu.Lock()
+	if st.closed {
+		st.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	st.targetConn = conn
 	st.connected = true
 	// 获取并清空缓存数据
@@ -120,32 +130,6 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 
 	st.mu.RLock()
 	targetConn := st.targetConn
-	st.mu.RUnlock()
-
-	if targetConn == nil {
-		// 连接还未建立,缓存数据
-		st.mu.Lock()
-		// 检查缓存大小限制,防止恶意客户端耗尽内存
-		var currentSize int
-		for _, d := range st.pendingData {
-			currentSize += len(d)
-		}
-		if currentSize+len(payload) > pendingDataMaxSize {
-			st.mu.Unlock()
-			log.Printf("[服务端] pendingData 超出限制 %d bytes, 拒绝连接 ID:%s", pendingDataMaxSize, common.ShortID(connID))
-			p.unregisterConn(connID)
-			return
-		}
-		// 避免重复缓存:如果已经有缓存数据,就不再添加（广播消息可能重复）
-		if st.targetConn == nil && len(st.pendingData) == 0 {
-			st.pendingData = append(st.pendingData, payload)
-		}
-		st.mu.Unlock()
-		return
-	}
-
-	// 只接受来自上行通道的数据,其余通道丢弃
-	st.mu.RLock()
 	uplinkChID := st.uplinkChID
 	st.mu.RUnlock()
 
@@ -154,6 +138,29 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 		// log.Printf("[服务端] 警告: 收到来自通道 %d 的数据,但上行通道是 %d, ID:%s,忽略",
 		// 	chID, uplinkChID, common.ShortID(connID))
 		return
+	}
+
+	if targetConn == nil {
+		// 连接还未建立,缓存数据
+		st.mu.Lock()
+		if st.targetConn == nil {
+			// 检查缓存大小限制,防止恶意客户端耗尽内存
+			var currentSize int
+			for _, d := range st.pendingData {
+				currentSize += len(d)
+			}
+			if currentSize+len(payload) > pendingDataMaxSize {
+				st.mu.Unlock()
+				log.Printf("[服务端] pendingData 超出限制 %d bytes, 拒绝连接 ID:%s", pendingDataMaxSize, common.ShortID(connID))
+				p.unregisterConn(connID)
+				return
+			}
+			st.pendingData = append(st.pendingData, payload)
+			st.mu.Unlock()
+			return
+		}
+		targetConn = st.targetConn
+		st.mu.Unlock()
 	}
 
 	_, err := targetConn.Write(payload)
@@ -189,14 +196,20 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 		return
 	}
 
-	// 验证消息是否从上行通道发送
+	// 验证消息是否从上行通道发送,且下行通道仍属于同一客户端
 	st.mu.RLock()
 	uplinkChID := st.uplinkChID
+	clientID := st.clientID
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
 		log.Printf("[服务端] 警告: MsgSelectDownlink 来自通道 %d,但上行通道是 %d, ID:%s,忽略",
 			chID, uplinkChID, common.ShortID(connID))
+		return
+	}
+	if clientID != "" && wsConn.clientID != "" && wsConn.clientID != clientID {
+		log.Printf("[服务端] 警告: 客户端 %s 试图选择其他客户端 %s 的通道 %d 作为下行通道, connID:%s",
+			clientID, wsConn.clientID, downlinkChID, common.ShortID(connID))
 		return
 	}
 
@@ -249,6 +262,13 @@ func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
 	ipStrategy := common.IPStrategy(meta[0])
 	target := string(meta[1:])
 
+	p.mu.Lock()
+	if _, exists := p.conns[connID]; exists {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+
 	// 创建 UDP socket
 	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
@@ -269,6 +289,11 @@ func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
 	}
 
 	p.mu.Lock()
+	if _, exists := p.conns[connID]; exists {
+		p.mu.Unlock()
+		_ = udpConn.Close()
+		return
+	}
 	p.conns[connID] = st
 	p.mu.Unlock()
 
@@ -358,7 +383,7 @@ func (p *serverPool) forwardUDPToClient(st *ServerConnState) {
 			return
 		}
 
-		udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		udpConn.SetReadDeadline(time.Now().Add(p.udpReadTimeout()))
 		n, addr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			return

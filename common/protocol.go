@@ -43,6 +43,9 @@ const (
 
 const headerLen = 8
 
+// maxInt 是 int 类型的最大值，用于防止切片分配溢出
+const maxInt = int(^uint(0) >> 1)
+
 // EncodeMessage 编码消息
 func EncodeMessage(t MessageType, connID string, meta, payload []byte) []byte {
 	if len(connID) > 255 {
@@ -70,13 +73,15 @@ func DecodeMessage(b []byte) (t MessageType, connID string, meta, payload []byte
 	t = MessageType(b[0])
 	idLen := int(b[1])
 	metaLen := int(binary.BigEndian.Uint16(b[2:4]))
-	payloadLen := int(binary.BigEndian.Uint32(b[4:8]))
-	total := headerLen + idLen + metaLen + payloadLen
-	// 注意: idLen 来自 uint8 转 int, 不会为负; metaLen 和 payloadLen 来自固定宽度无符号整数转 int
-	// 在 32 位系统上, payloadLen 可能溢出, 检查 total 是否小于 headerLen
-	if total < headerLen || total > len(b) {
+	payloadLen32 := binary.BigEndian.Uint32(b[4:8])
+
+	// 使用 uint64 计算总长度，避免 32 位平台上 int 溢出
+	total := uint64(headerLen) + uint64(idLen) + uint64(metaLen) + uint64(payloadLen32)
+	if total > uint64(len(b)) || total > uint64(maxInt) {
 		return 0, "", nil, nil, errors.New("长度无效")
 	}
+
+	payloadLen := int(payloadLen32)
 	off := headerLen
 	connID = string(b[off : off+idLen])
 	off += idLen

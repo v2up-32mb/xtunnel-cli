@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -34,12 +35,21 @@ func main() {
 	// 解析监听地址
 	listenAddrs := parseListenAddrs()
 
-	// 启动 SOCKS5 监听器
+	// 启动本地代理监听器
 	for _, addr := range listenAddrs {
 		a := addr // 创建局部变量
 		go func() {
-			if err := c.ListenSOCKS5(a); err != nil {
-				log.Printf("[客户端] SOCKS5 监听器错误 (%s): %v", a, err)
+			var err error
+			switch {
+			case strings.HasPrefix(a, "socks5://"):
+				err = c.ListenSOCKS5(a)
+			case strings.HasPrefix(a, "http://"):
+				err = c.ListenHTTP(a)
+			default:
+				err = fmt.Errorf("不支持的监听协议")
+			}
+			if err != nil {
+				log.Printf("[客户端] 监听器错误 (%s): %v", a, err)
 			}
 		}()
 	}
@@ -54,34 +64,47 @@ func main() {
 }
 
 func init() {
-	flag.StringVar(&listenAddr, "l", "", "监听地址 (仅支持 socks5://,支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080")
-	flag.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式,必须是 wss://host:port/path)")
-	flag.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式:IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT）,多个节点用逗号分隔")
-	flag.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表,逗号分隔,如 443,8443")
-	flag.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
-	flag.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
-	flag.StringVar(&dnsServer, "dns", "https://v.recipes/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
-	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "用于查询 ECH 公钥的域名")
-	flag.BoolVar(&fallback, "fallback", false, "是否禁用 ECH 并回落到普通 TLS 1.3 (默认 false)")
-	flag.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
-	flag.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
+	registerFlags(flag.CommandLine)
+}
+
+func registerFlags(fs *flag.FlagSet) {
+	fs.StringVar(&configFile, "config", "", "JSON 配置文件路径（可选，CLI 参数优先级更高）")
+	fs.StringVar(&listenAddr, "l", "", "监听地址 (支持 socks5:// 或 http://,支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080\n  http://[user:pass@]0.0.0.0:8080")
+	fs.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式,必须是 wss://host:port/path)")
+	fs.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式:IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT）,多个节点用逗号分隔")
+	fs.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表,逗号分隔,如 443,8443")
+	fs.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
+	fs.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
+	fs.StringVar(&dnsServer, "dns", "https://v.recipes/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
+	fs.StringVar(&echDomain, "ech", "cloudflare-ech.com", "用于查询 ECH 公钥的域名")
+	fs.BoolVar(&fallback, "fallback", false, "是否禁用 ECH 并回落到普通 TLS 1.3 (默认 false)")
+	fs.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
+	fs.IntVar(&maxSOCKS5Connections, "max-socks5-conns", 1024, "SOCKS5 最大并发连接数，0 表示无限制")
+	fs.DurationVar(&connectTimeout, "connect-timeout", 15*time.Second, "本地代理等待远端建链超时")
+	fs.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
 }
 
 var (
-	listenAddr       string
-	forwardAddr      string
-	ipAddr           string
-	udpBlockPortsStr string
-	token            string
-	fallback         bool
-	insecure         bool
-	connectionNum    int
-	ips              string
-	dnsServer        string
-	echDomain        string
+	configFile           string
+	listenAddr           string
+	forwardAddr          string
+	ipAddr               string
+	udpBlockPortsStr     string
+	token                string
+	fallback             bool
+	insecure             bool
+	connectionNum        int
+	maxSOCKS5Connections int
+	connectTimeout       time.Duration
+	ips                  string
+	dnsServer            string
+	echDomain            string
 )
 
 func parseFlags() *client.Config {
+	if err := applyClientFileConfig(configFile, visitedFlags()); err != nil {
+		log.Fatalf("[客户端] 读取配置文件失败: %v", err)
+	}
 	if listenAddr == "" || forwardAddr == "" {
 		flag.Usage()
 		os.Exit(1)
@@ -135,26 +158,19 @@ func parseFlags() *client.Config {
 		enableECH = false
 	}
 
-	cfg := &client.Config{
-		ServerAddr:        forwardAddr,
-		Token:             token,
-		Connections:       connectionNum,
-		RelayNodes:        relayNodes,
-		EnableECH:         enableECH,
-		ECHDomain:         echDomain,
-		DNSServer:         dnsServer,
-		InsecureSkipVerify: insecure,
-		IPStrategy:        ipStrategy,
-		UDPBlockedPorts:   udpBlockedPorts,
-		DialTimeout:       3 * time.Second,
-		HandshakeTimeout:  5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      5 * time.Second,
-		PingInterval:      5 * time.Second,
-		ReconnectDelay:    1 * time.Second,
-		ReadBufferSize:    64 * 1024,
-		WriteBufferSize:   64 * 1024,
-	}
+	cfg := client.DefaultConfig()
+	cfg.ServerAddr = forwardAddr
+	cfg.Token = token
+	cfg.Connections = connectionNum
+	cfg.RelayNodes = relayNodes
+	cfg.EnableECH = enableECH
+	cfg.ECHDomain = echDomain
+	cfg.DNSServer = dnsServer
+	cfg.InsecureSkipVerify = insecure
+	cfg.IPStrategy = ipStrategy
+	cfg.UDPBlockedPorts = udpBlockedPorts
+	cfg.ConnectTimeout = connectTimeout
+	cfg.MaxSOCKS5Connections = maxSOCKS5Connections
 
 	// 生成客户端 ID
 	clientID := uuid.NewString()
@@ -175,8 +191,8 @@ func parseListenAddrs() []string {
 		if l == "" {
 			continue
 		}
-		if !strings.HasPrefix(l, "socks5://") {
-			log.Fatalf("[客户端] 仅支持 SOCKS5 监听:非法监听地址 %q", l)
+		if !strings.HasPrefix(l, "socks5://") && !strings.HasPrefix(l, "http://") {
+			log.Fatalf("[客户端] 仅支持 SOCKS5/HTTP 监听:非法监听地址 %q", l)
 		}
 		listeners = append(listeners, l)
 	}

@@ -75,9 +75,10 @@ func (s *Server) Start() error {
 
 	// 创建 HTTP 服务器
 	s.httpSrv = &http.Server{
-		Addr:      s.config.ListenAddr,
-		Handler:   http.HandlerFunc(s.pool.handleWebSocket),
-		TLSConfig: tlsConfig,
+		Addr:              s.config.ListenAddr,
+		Handler:           http.HandlerFunc(s.pool.handleWebSocket),
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: s.config.HandshakeTimeout,
 	}
 
 	// 启动服务器（在 goroutine 中）
