@@ -41,13 +41,14 @@ const pendingDataMaxSize = 1024 * 1024 // 1MB
 
 // ServerWSConn WebSocket 连接
 type ServerWSConn struct {
-	ws        *websocket.Conn
-	chID      int
-	clientID  string
-	pool      *serverPool
-	mu        sync.Mutex
-	closed    bool
-	writeChan chan writeTask
+	ws         *websocket.Conn
+	chID       int
+	clientID   string
+	remoteAddr string
+	pool       *serverPool
+	mu         sync.Mutex
+	closed     bool
+	writeChan  chan writeTask
 }
 
 // start 启动写入协程
