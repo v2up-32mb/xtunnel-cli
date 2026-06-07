@@ -120,11 +120,12 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wsConn := &ServerWSConn{
-		ws:        ws,
-		chID:      chID,
-		clientID:  clientID,
-		pool:      p,
-		writeChan: make(chan writeTask, 4096),
+		ws:         ws,
+		chID:       chID,
+		clientID:   clientID,
+		remoteAddr: ws.RemoteAddr().String(),
+		pool:       p,
+		writeChan:  make(chan writeTask, 4096),
 	}
 
 	// 存储 WebSocket 连接（再次校验上限，避免并发窗口超限）

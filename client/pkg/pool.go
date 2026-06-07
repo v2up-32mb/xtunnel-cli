@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"x-tunnel/common"
 )
@@ -52,6 +53,7 @@ type clientPool struct {
 	config       *Config
 	ctx          context.Context
 	cancel       context.CancelFunc
+	clientID     string
 	relayManager *RelayNodeManager
 	echManager   *ECHManager
 
@@ -78,7 +80,8 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		config:            cfg,
 		ctx:               ctx,
 		cancel:            cancel,
-		echManager:        NewECHManager(cfg),
+		clientID:          uuid.NewString(),
+		echManager:        NewECHManager(cfg, ctx),
 		relayManager:      NewRelayNodeManager(),
 		wsConns:           make([]*websocket.Conn, cfg.Connections),
 		writeQueues:       make([]chan writeJob, cfg.Connections),
@@ -104,13 +107,12 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 
 // Start 启动连接池
 func (p *clientPool) Start(relayNodes []string) {
-	// 启动 ECH 管理器（包含定期刷新）
+	// 启动 ECH 管理器（首次加载完成后再继续拨号）
 	if p.config.EnableECH {
-		go func() {
-			if err := p.echManager.Start(); err != nil {
-				log.Printf("[客户端] ECH 启动失败: %v", err)
-			}
-		}()
+		if err := p.echManager.Start(); err != nil {
+			log.Printf("[客户端] ECH 启动失败: %v", err)
+			return
+		}
 	}
 
 	// 添加中转节点
@@ -232,6 +234,12 @@ func (p *clientPool) chIndex(chID int) (int, error) {
 	return idx, nil
 }
 
+var (
+	dialAndServeMaxRetries = 20
+	dialAndServeBaseDelay  = 3 * time.Second
+	dialAndServeMaxDelay   = 60 * time.Second
+)
+
 // dialAndServe 连接并服务 WebSocket
 func (p *clientPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
@@ -241,12 +249,10 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 
 	// 重试控制
 	retryCount := 0
-	maxRetries := 20 // 最大重试次数
+	slowRetryMode := false
 
 	// 指数退避参数
-	baseDelay := 3 * time.Second
-	maxDelay := 60 * time.Second
-	currentDelay := baseDelay
+	currentDelay := dialAndServeBaseDelay
 
 	for {
 		// 检查是否需要退出
@@ -258,9 +264,11 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		}
 
 		// 检查重试次数
-		if retryCount >= maxRetries {
-			log.Printf("[客户端] 通道 %d 重试次数超限 (%d 次)，放弃重连", chID, maxRetries)
-			return
+		if retryCount >= dialAndServeMaxRetries && !slowRetryMode {
+			log.Printf("[客户端] 通道 %d 重试次数超限 (%d 次)，转入慢速持续重试", chID, dialAndServeMaxRetries)
+			slowRetryMode = true
+			retryCount = 0
+			currentDelay = dialAndServeMaxDelay
 		}
 
 		// 如果有中转节点配置,在重连时申请新节点
@@ -292,7 +300,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			if relayInfo == "" && ip != "" {
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			}
-			log.Printf("[客户端] 通道 %d%s 连接失败: %v (重试 %d/%d)", chID, relayInfo, err, retryCount, maxRetries)
+			log.Printf("[客户端] 通道 %d%s 连接失败: %v (重试 %d/%d)", chID, relayInfo, err, retryCount, dialAndServeMaxRetries)
 
 			// 标记节点失败
 			if ip != "" && p.relayCount > 0 {
@@ -300,10 +308,10 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			}
 
 			// 计算退避时间（指数退避）
-			if currentDelay < maxDelay {
+			if currentDelay < dialAndServeMaxDelay {
 				currentDelay = time.Duration(float64(currentDelay) * 1.5)
-				if currentDelay > maxDelay {
-					currentDelay = maxDelay
+				if currentDelay > dialAndServeMaxDelay {
+					currentDelay = dialAndServeMaxDelay
 				}
 			}
 
@@ -318,7 +326,8 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 
 		// 连接成功，重置重试计数和退避时间
 		retryCount = 0
-		currentDelay = baseDelay
+		slowRetryMode = false
+		currentDelay = dialAndServeBaseDelay
 
 		// 标记节点成功
 		if ip != "" && p.relayCount > 0 {
@@ -345,7 +354,11 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.cleanupChannel(chID)
 
 		log.Printf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
-		time.Sleep(p.config.ReconnectDelay)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(p.config.ReconnectDelay):
+		}
 	}
 }
 

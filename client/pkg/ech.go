@@ -27,26 +27,33 @@ const echConfigTTL = 1 * time.Hour
 const echRefreshInterval = 5 * time.Minute
 
 type ECHManager struct {
-	config       *Config
-	echList      []byte
-	echListMu    sync.RWMutex
-	refreshMu    sync.Mutex
-	refreshTimer *time.Ticker // 定期刷新定时器
-	stopChan     chan struct{} // 停止信号通道
-	stopped      bool          // 防止重复关闭
-	lastRefresh  time.Time     // 最后刷新时间
-	ctx          context.Context
-	cancel       context.CancelFunc
+	config               *Config
+	echList              []byte
+	echListMu            sync.RWMutex
+	refreshMu            sync.Mutex
+	refreshTimer         *time.Ticker  // 定期刷新定时器
+	stopChan             chan struct{} // 停止信号通道
+	stopped              bool          // 防止重复关闭
+	lastRefresh          time.Time     // 最后刷新时间
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	queryDoHFn           func(domain, dohURL string) (string, error)
+	queryDNSUDPFn        func(domain, dnsServer string) (string, error)
+	fallbackDNSUDPServer string
 }
 
-func NewECHManager(cfg *Config) *ECHManager {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &ECHManager{
-		config:   cfg,
-		stopChan: make(chan struct{}),
-		ctx:      ctx,
-		cancel:   cancel,
+func NewECHManager(cfg *Config, parent context.Context) *ECHManager {
+	ctx, cancel := context.WithCancel(parent)
+	m := &ECHManager{
+		config:               cfg,
+		stopChan:             make(chan struct{}),
+		ctx:                  ctx,
+		cancel:               cancel,
+		fallbackDNSUDPServer: "8.8.8.8:53",
 	}
+	m.queryDoHFn = m.queryDoH
+	m.queryDNSUDPFn = m.queryDNSUDP
+	return m
 }
 
 func (m *ECHManager) Prepare() error {
@@ -175,6 +182,10 @@ func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
 		return m.buildStandardTLSConfig(serverName)
 	}
 
+	if m.config.ECHDomain != "" && !strings.EqualFold(m.config.ECHDomain, serverName) {
+		log.Printf("[客户端] 警告: ECH 查询域名 %s 与服务端主机名 %s 不一致，可能导致 ECH 配置不匹配", m.config.ECHDomain, serverName)
+	}
+
 	ech, e := m.GetList()
 	if e != nil {
 		return nil, e
@@ -218,9 +229,20 @@ func (m *ECHManager) buildStandardTLSConfig(serverName string) (*tls.Config, err
 
 func (m *ECHManager) queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	if strings.HasPrefix(dnsServer, "http://") || strings.HasPrefix(dnsServer, "https://") {
-		return m.queryDoH(domain, dnsServer)
+		result, err := m.queryDoHFn(domain, dnsServer)
+		if err == nil {
+			return result, nil
+		}
+		if m.queryDNSUDPFn == nil || m.fallbackDNSUDPServer == "" {
+			return "", err
+		}
+		fallbackResult, fallbackErr := m.queryDNSUDPFn(domain, m.fallbackDNSUDPServer)
+		if fallbackErr == nil {
+			return fallbackResult, nil
+		}
+		return "", err
 	}
-	return m.queryDNSUDP(domain, dnsServer)
+	return m.queryDNSUDPFn(domain, dnsServer)
 }
 
 func (m *ECHManager) queryDNSUDP(domain, dnsServer string) (string, error) {

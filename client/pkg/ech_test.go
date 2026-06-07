@@ -1,7 +1,9 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +25,7 @@ func TestQueryDoHContextCancelReturnsQuickly(t *testing.T) {
 		ECHDomain: "example.com",
 		DNSServer: server.URL,
 	}
-	m := NewECHManager(cfg)
+	m := NewECHManager(cfg, context.Background())
 
 	done := make(chan error, 1)
 	go func() {
@@ -63,7 +65,7 @@ func TestQueryDNSUDPContextCancelReturnsQuickly(t *testing.T) {
 		ECHDomain: "example.com",
 		DNSServer: pc.LocalAddr().String(),
 	}
-	m := NewECHManager(cfg)
+	m := NewECHManager(cfg, context.Background())
 
 	// 只读包不响应，制造 Read 阻塞。
 	go func() {
@@ -107,7 +109,7 @@ func TestPrepareReturnsOnCancel(t *testing.T) {
 		ECHDomain: "example.com",
 		DNSServer: server.URL,
 	}
-	m := NewECHManager(cfg)
+	m := NewECHManager(cfg, context.Background())
 
 	done := make(chan error, 1)
 	go func() {
@@ -130,14 +132,14 @@ func TestPrepareReturnsOnCancel(t *testing.T) {
 // TestStopIdempotent 验证 Stop 可重复调用而不 panic。
 func TestStopIdempotent(t *testing.T) {
 	cfg := &Config{EnableECH: false}
-	m := NewECHManager(cfg)
+	m := NewECHManager(cfg, context.Background())
 	m.Stop()
 	m.Stop()
 }
 
 func TestBuildTLSConfigECHDisabled(t *testing.T) {
 	cfg := &Config{EnableECH: false}
-	m := NewECHManager(cfg)
+	m := NewECHManager(cfg, context.Background())
 
 	tlsCfg, err := m.BuildTLSConfig("example.com")
 	if err != nil {
@@ -154,5 +156,75 @@ func TestBuildTLSConfigECHDisabled(t *testing.T) {
 	}
 	if tlsCfg.ServerName != "example.com" {
 		t.Fatalf("unexpected ServerName: got %q", tlsCfg.ServerName)
+	}
+}
+
+func TestECHManagerStopsWhenParentContextIsCancelled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableECH = true
+	cfg.DNSServer = "127.0.0.1:1"
+	cfg.ECHDomain = "invalid.example"
+
+	parent, cancel := context.WithCancel(context.Background())
+	m := NewECHManager(cfg, parent)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- m.Prepare()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("Prepare() returned nil after cancellation, want context error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Prepare() did not return after parent context cancellation")
+	}
+}
+
+func TestQueryHTTPSRecordFallsBackFromDoHToUDP(t *testing.T) {
+	cfg := DefaultConfig()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewECHManager(cfg, parent)
+
+	dohServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer dohServer.Close()
+
+	m.queryDNSUDPFn = func(domain, dnsServer string) (string, error) {
+		if dnsServer != "8.8.8.8:53" {
+			t.Fatalf("fallback dns server = %q, want %q", dnsServer, "8.8.8.8:53")
+		}
+		return "ech-value", nil
+	}
+
+	got, err := m.queryHTTPSRecord("example.com", dohServer.URL)
+	if err != nil {
+		t.Fatalf("queryHTTPSRecord() error = %v", err)
+	}
+	if got != "ech-value" {
+		t.Fatalf("queryHTTPSRecord() = %q, want %q", got, "ech-value")
+	}
+}
+
+func TestQueryHTTPSRecordReturnsOriginalErrorWhenFallbackFails(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := NewECHManager(DefaultConfig(), parent)
+
+	expected := errors.New("udp failed")
+	m.queryDNSUDPFn = func(domain, dnsServer string) (string, error) {
+		return "", expected
+	}
+
+	_, err := m.queryHTTPSRecord("example.com", "8.8.8.8:53")
+	if !errors.Is(err, expected) {
+		t.Fatalf("queryHTTPSRecord() error = %v, want %v", err, expected)
 	}
 }
