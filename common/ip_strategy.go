@@ -4,7 +4,43 @@ package common
 import (
 	"net"
 	"strings"
+	"sync"
+	"time"
 )
+
+var (
+	lookupIP    = net.LookupIP
+	dnsCacheTTL = time.Minute
+	dnsCache    sync.Map
+)
+
+type dnsCacheEntry struct {
+	addrs     []net.IP
+	expiresAt time.Time
+}
+
+func resetDNSCache() {
+	dnsCache = sync.Map{}
+}
+
+func lookupIPCached(host string) ([]net.IP, error) {
+	if cached, ok := dnsCache.Load(host); ok {
+		entry := cached.(dnsCacheEntry)
+		if time.Now().Before(entry.expiresAt) {
+			return entry.addrs, nil
+		}
+		dnsCache.Delete(host)
+	}
+
+	addrs, err := lookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	copied := make([]net.IP, len(addrs))
+	copy(copied, addrs)
+	dnsCache.Store(host, dnsCacheEntry{addrs: copied, expiresAt: time.Now().Add(dnsCacheTTL)})
+	return copied, nil
+}
 
 // IPStrategy IP 地址偏好策略
 type IPStrategy byte
@@ -68,7 +104,7 @@ func ResolveWithStrategy(target string, strategy IPStrategy) string {
 
 // resolveIPv4Only 仅返回 IPv4 地址
 func resolveIPv4Only(host, port string) string {
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIPCached(host)
 	if err != nil {
 		return host + ":" + port
 	}
@@ -82,7 +118,7 @@ func resolveIPv4Only(host, port string) string {
 
 // resolveIPv6Only 仅返回 IPv6 地址
 func resolveIPv6Only(host, port string) string {
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIPCached(host)
 	if err != nil {
 		return "[" + host + "]:" + port
 	}
@@ -96,7 +132,7 @@ func resolveIPv6Only(host, port string) string {
 
 // resolveIPv4First 优先返回 IPv4 地址
 func resolveIPv4First(host, port string) string {
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIPCached(host)
 	if err != nil {
 		return host + ":" + port
 	}
@@ -117,7 +153,7 @@ func resolveIPv4First(host, port string) string {
 
 // resolveIPv6First 优先返回 IPv6 地址
 func resolveIPv6First(host, port string) string {
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIPCached(host)
 	if err != nil {
 		return "[" + host + "]:" + port
 	}

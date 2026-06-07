@@ -104,6 +104,7 @@ func (a *udpAssociation) Close() {
 	a.mu.Unlock()
 
 	a.notifyDone()
+	_ = a.udpListener.Close()
 
 	if closedHadReceiving {
 		if chID >= 0 {
@@ -115,7 +116,6 @@ func (a *udpAssociation) Close() {
 	} else {
 		a.pool.Unregister(connID)
 	}
-	_ = a.udpListener.Close()
 }
 
 // ListenSOCKS5 启动 SOCKS5 监听器
