@@ -450,7 +450,7 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 		if common.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != common.BackpressurePause {
 			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressurePause))
 			p.broadcastBackpressure(common.BackpressurePause)
-			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes)", newSize, limit)
+			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		}
 		return
 	}
@@ -461,7 +461,7 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
 				atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
 				p.broadcastBackpressure(common.BackpressureSlowDown)
-				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes)", newSize, limit)
+				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 				go func() {
 					time.Sleep(1 * time.Second)
 					atomic.StoreInt32(&p.backpressureCooldown, 0)
@@ -484,14 +484,35 @@ func (p *serverPool) removeQueueBytes(size int) {
 		return
 	}
 
-	// 检查是否可以恢复正常（低水位：30%）
-	if newSize < limit*3/10 {
-		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
-		if currentState != common.BackpressureNormal {
-			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
-			p.broadcastBackpressure(common.BackpressureNormal)
-			log.Printf("[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes)", newSize, limit)
-		}
+	currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+
+	// 分级恢复机制：
+	// 暂停(95%) -> 减速(90%) -> 正常(70%)
+	// 特殊情况：队列快速降到30%以下，直接恢复正常
+	// 恢复阈值略低于触发阈值，避免频繁切换状态
+
+	// 直接从暂停恢复到正常（极低水位：30%，用于队列快速清空的情况）
+	if currentState == common.BackpressurePause && newSize < limit*3/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
+		p.broadcastBackpressure(common.BackpressureNormal)
+		log.Printf("[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		return
+	}
+
+	// 从暂停恢复到减速（90%，略低于暂停触发阈值95%）
+	if currentState == common.BackpressurePause && newSize < limit*9/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
+		p.broadcastBackpressure(common.BackpressureSlowDown)
+		log.Printf("[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		return
+	}
+
+	// 从减速恢复到正常（70%，略低于减速触发阈值80%）
+	if currentState == common.BackpressureSlowDown && newSize < limit*7/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
+		p.broadcastBackpressure(common.BackpressureNormal)
+		log.Printf("[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		return
 	}
 }
 
