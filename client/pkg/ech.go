@@ -33,7 +33,7 @@ type ECHManager struct {
 	refreshMu            sync.Mutex
 	refreshTimer         *time.Ticker  // 定期刷新定时器
 	stopChan             chan struct{} // 停止信号通道
-	stopped              bool          // 防止重复关闭
+	stopOnce             sync.Once     // 保证 Stop 只执行一次
 	lastRefresh          time.Time     // 最后刷新时间
 	ctx                  context.Context
 	cancel               context.CancelFunc
@@ -165,16 +165,14 @@ func (m *ECHManager) Start() error {
 }
 
 func (m *ECHManager) Stop() {
-	if m.stopped {
-		return
-	}
-	m.stopped = true
-	if m.refreshTimer != nil {
-		m.refreshTimer.Stop()
-	}
-	m.cancel()
-	close(m.stopChan)
-	log.Printf("[客户端] ECH 管理器已停止")
+	m.stopOnce.Do(func() {
+		if m.refreshTimer != nil {
+			m.refreshTimer.Stop()
+		}
+		m.cancel()
+		close(m.stopChan)
+		log.Printf("[客户端] ECH 管理器已停止")
+	})
 }
 
 func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {

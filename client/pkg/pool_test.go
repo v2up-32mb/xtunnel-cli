@@ -377,6 +377,7 @@ func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 	cfg.ServerAddr = strings.Replace(server.URL, "https://", "wss://", 1)
 	cfg.EnableECH = false
 	cfg.InsecureSkipVerify = true
+	cfg.ClientID = "test-client-id"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

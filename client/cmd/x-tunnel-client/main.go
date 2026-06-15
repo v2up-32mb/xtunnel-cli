@@ -172,9 +172,9 @@ func parseFlags() *client.Config {
 	cfg.ConnectTimeout = connectTimeout
 	cfg.MaxSOCKS5Connections = maxSOCKS5Connections
 
-	// 生成客户端 ID
-	clientID := uuid.NewString()
-	log.Printf("[客户端] 客户端ID: %s", clientID)
+	// 生成并复用客户端 ID
+	cfg.ClientID = uuid.NewString()
+	log.Printf("[客户端] 客户端ID: %s", cfg.ClientID)
 
 	return cfg
 }

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"x-tunnel/common"
 )
@@ -35,7 +34,7 @@ type clientConnState struct {
 	tcpConn    net.Conn
 	udpAssoc   *udpAssociation
 	uplink     int
-	downlink   int
+	downlink   int32 // 使用 atomic 操作，避免每个 TCPData 包都加全局锁
 	lastCh     int
 	start      time.Time
 	clientAddr string
@@ -69,9 +68,8 @@ type clientPool struct {
 	socks5Sem  chan struct{} // SOCKS5 连接信号量
 
 	// 背压控制
-	backpressureState int32      // 原子操作，背压状态
-	backpressureCond  *sync.Cond // 用于暂停/恢复
-	backpressureMu    sync.Mutex // Cond 的锁
+	backpressureState int32         // 原子操作，背压状态
+	resumeCh          chan struct{} // 背压恢复信号（带缓冲，避免发送阻塞）
 }
 
 // newClientPool 创建新的连接池
@@ -80,7 +78,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		config:            cfg,
 		ctx:               ctx,
 		cancel:            cancel,
-		clientID:          uuid.NewString(),
+		clientID:          cfg.ClientID,
 		echManager:        NewECHManager(cfg, ctx),
 		relayManager:      NewRelayNodeManager(),
 		wsConns:           make([]*websocket.Conn, cfg.Connections),
@@ -90,8 +88,8 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		globalQueueLimit:  int64(cfg.ReadBufferSize) * 8,
 		nextChannel:       1,
 		backpressureState: int32(common.BackpressureNormal),
+		resumeCh:          make(chan struct{}, 1),
 	}
-	p.backpressureCond = sync.NewCond(&p.backpressureMu)
 
 	// 初始化 SOCKS5 连接信号量
 	if cfg.MaxSOCKS5Connections > 0 {
@@ -135,8 +133,8 @@ func (p *clientPool) Start(relayNodes []string) {
 			// 使用申请到的节点建立连接
 			log.Printf("[客户端] 初始化成功申请到 %d 个中转节点", len(bestNodes))
 			for _, node := range bestNodes {
-				latency := node.Latency.Milliseconds()
-				log.Printf("[客户端] 中转节点: %s (评分: %.2f, 延迟: %dms)", node.IP, node.Score, latency)
+				latency := node.latency.Milliseconds()
+				log.Printf("[客户端] 中转节点: %s (评分: %.2f, 延迟: %dms)", node.ip, node.score, latency)
 			}
 			log.Printf("[客户端] 每个节点建立 %d 条连接", p.config.Connections)
 			log.Printf("[客户端] 共计建立 %d 条 WebSocket 连接", len(bestNodes)*p.config.Connections)
@@ -159,7 +157,7 @@ func (p *clientPool) Start(relayNodes []string) {
 			for nodeIdx, node := range bestNodes {
 				for j := 0; j < p.config.Connections; j++ {
 					chIdx := nodeIdx*p.config.Connections + j
-					go p.dialAndServe(chIdx, node.IP)
+					go p.dialAndServe(chIdx, node.ip)
 				}
 			}
 			return
@@ -285,8 +283,8 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			newNode := p.relayManager.SelectNodeExcluding(excludeIPs)
 			if newNode != nil {
 				log.Printf("[客户端] 通道 %d 重连:申请新中转节点 %s (评分: %.2f, 延迟: %dms)",
-					chID, newNode.IP, newNode.Score, newNode.Latency.Milliseconds())
-				ip = newNode.IP
+					chID, newNode.ip, newNode.score, newNode.latency.Milliseconds())
+				ip = newNode.ip
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
 			} else {
 				log.Printf("[客户端] 通道 %d 重连:无可用的健康中转节点,使用原有节点", chID)
@@ -549,6 +547,26 @@ func (p *clientPool) writeWorker(id int, conn *websocket.Conn, queue chan writeJ
 	}
 }
 
+// writeControlDirect 直接发送控制帧（Ping/Pong/Close），不经过写队列，也不受背压影响。
+// 控制帧是 WebSocket 保活机制的一部分，不能在背压暂停时阻塞 readLoop。
+func (p *clientPool) writeControlDirect(chID int, msgType int, data []byte) error {
+	idx, err := p.chIndex(chID)
+	if err != nil {
+		return err
+	}
+
+	p.wsConnsMu.RLock()
+	conn := p.wsConns[idx]
+	p.wsConnsMu.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("通道 %d 不可用", chID)
+	}
+
+	deadline := time.Now().Add(p.config.WriteTimeout)
+	// WriteControl 自身保证并发安全，且可与其他 WriteMessage 并发调用。
+	return conn.WriteControl(msgType, data, deadline)
+}
+
 // asyncWriteDirect 异步直接写入指定通道
 func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error {
 	idx, err := p.chIndex(chID)
@@ -746,7 +764,7 @@ func (p *clientPool) Unregister(connID string) {
 	st.closed = true
 
 	target := st.target
-	up, down := st.uplink, st.downlink
+	up, down := st.uplink, int(atomic.LoadInt32(&st.downlink))
 	if up == 0 && st.lastCh > 0 {
 		up = st.lastCh
 	}
@@ -791,7 +809,7 @@ func (p *clientPool) Unregister(connID string) {
 	}
 }
 
-// selectDownlink 选择下行通道
+// selectDownlink 选择下行通道，返回是否首次选中以及已选中的通道号。
 func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, chosen int, start time.Time, target string, uplink int, typ string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -799,14 +817,20 @@ func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, cho
 	if st == nil || st.target == "" {
 		return
 	}
-	if st.downlink > 0 {
-		chosen = st.downlink
+
+	chosen = int(atomic.LoadInt32(&st.downlink))
+	if chosen > 0 {
 		selected = false
 	} else {
-		st.downlink = chID
-		chosen = chID
-		selected = true
-		start = st.start
+		// CAS：只有从未设置过 downlink 时才设置，避免竞态
+		if atomic.CompareAndSwapInt32(&st.downlink, 0, int32(chID)) {
+			chosen = chID
+			selected = true
+			start = st.start
+		} else {
+			chosen = int(atomic.LoadInt32(&st.downlink))
+			selected = false
+		}
 	}
 	target = st.target
 	uplink = -1
@@ -815,6 +839,21 @@ func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, cho
 	}
 	typ = st.reqType
 	return
+}
+
+// getDownlink 快速读取已选中的下行通道（不加全局锁）。
+func (p *clientPool) getDownlink(connID string) (int, bool) {
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+	if st == nil {
+		return 0, false
+	}
+	ch := int(atomic.LoadInt32(&st.downlink))
+	if ch > 0 {
+		return ch, true
+	}
+	return 0, false
 }
 
 func (p *clientPool) connectTimeout() time.Duration {
@@ -886,7 +925,7 @@ func (p *clientPool) cleanupChannel(chID int) {
 	p.mu.Lock()
 	var toClose []string
 	for id, st := range p.conns {
-		if st.uplink == chID || st.downlink == chID {
+		if st.uplink == chID || int(atomic.LoadInt32(&st.downlink)) == chID {
 			toClose = append(toClose, id)
 		}
 	}
@@ -918,8 +957,7 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(p.config.ReadTimeout))
 	conn.SetPingHandler(func(m string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(p.config.ReadTimeout))
-		err := p.asyncWriteDirect(chID, websocket.PongMessage, []byte(m))
-		if err != nil {
+		if err := p.writeControlDirect(chID, websocket.PongMessage, []byte(m)); err != nil {
 			log.Printf("[客户端] 通道 %d pong发送失败: %v", chID, err)
 		}
 		// pong 发送失败不影响 ping/pong 循环,总是返回 nil
@@ -965,17 +1003,16 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
 			selected, _, _, target, up, _ := p.selectDownlink(connID, chID)
 			if selected {
-				p.mu.RLock()
-				downlink := 0
+				chosen := int(atomic.LoadInt32(&p.conns[connID].downlink))
 				clientAddr := ""
+				p.mu.RLock()
 				if st := p.conns[connID]; st != nil {
-					downlink = st.downlink
 					clientAddr = st.clientAddr
 				}
 				p.mu.RUnlock()
-				if downlink > 0 && target != "" {
+				if chosen > 0 && target != "" {
 					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
-						clientAddr, target, up, downlink, common.ShortID(connID))
+						clientAddr, target, up, chosen, common.ShortID(connID))
 				}
 				// 通过 uplink 通道发送 MsgSelectDownlink,meta 中携带下行通道号
 				downlinkBytes := make([]byte, 4)
@@ -996,9 +1033,17 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 
 		case common.MsgTCPData:
 			// 下行数据:只处理来自已选中下行通道的数据
-			_, chosen, _, _, _, _ := p.selectDownlink(connID, chID)
-			if chosen != chID {
-				continue
+			chosen, ok := p.getDownlink(connID)
+			if ok {
+				if chosen != chID {
+					continue
+				}
+			} else {
+				// 尚未选择下行通道，使用 selectDownlink 竞争（仅首次）
+				_, chosen, _, _, _, _ = p.selectDownlink(connID, chID)
+				if chosen != chID {
+					continue
+				}
 			}
 			p.mu.RLock()
 			var c net.Conn
@@ -1033,7 +1078,23 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			p.Unregister(connID)
 
 		case common.MsgUDPData:
-			selected, chosen, start, target, up, typ := p.selectDownlink(connID, chID)
+			// 先尝试无锁读取下行通道；未设置再走 selectDownlink 竞争
+			chosen, ok := p.getDownlink(connID)
+			selected := false
+			start := time.Time{}
+			target := ""
+			up := -1
+			typ := ""
+			if ok {
+				if chosen != chID {
+					continue
+				}
+			} else {
+				selected, chosen, start, target, up, typ = p.selectDownlink(connID, chID)
+				if chosen != chID {
+					continue
+				}
+			}
 			if selected {
 				downlinkBytes := make([]byte, 4)
 				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
@@ -1052,9 +1113,6 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 					log.Printf("[客户端] %s %s 访问: %s, 通道: TX %d RX %d, ID:%s, 延迟 %.1f ms",
 						client, typ, target, up, chID, common.ShortID(connID), ms)
 				}
-			}
-			if chosen != chID {
-				continue
 			}
 			p.mu.RLock()
 			var assoc *udpAssociation
@@ -1127,8 +1185,11 @@ func (p *clientPool) handleBackpressure(state common.BackpressureState) {
 
 	switch state {
 	case common.BackpressureNormal:
-		// 恢复正常，唤醒所有等待的写入
-		p.backpressureCond.Broadcast()
+		// 恢复正常，向 resumeCh 发送信号（带缓冲，不阻塞发送方）
+		select {
+		case p.resumeCh <- struct{}{}:
+		default:
+		}
 		log.Printf("[客户端] 背压恢复，继续正常发送")
 
 	case common.BackpressureSlowDown:
@@ -1142,36 +1203,19 @@ func (p *clientPool) handleBackpressure(state common.BackpressureState) {
 // waitForBackpressure 等待背压恢复正常（用于暂停状态）
 // 返回 true 表示可以继续，false 表示应该放弃
 func (p *clientPool) waitForBackpressure() bool {
-	state := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+	for {
+		state := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+		if state != common.BackpressurePause {
+			return true
+		}
 
-	// 如果处于暂停状态，等待恢复
-	if state == common.BackpressurePause {
-		p.backpressureMu.Lock()
-		defer p.backpressureMu.Unlock()
-
-		// 启动一个 goroutine 在 context 取消时广播
-		done := make(chan struct{})
-		go func() {
-			select {
-			case <-p.ctx.Done():
-				p.backpressureCond.Broadcast()
-			case <-done:
-			}
-		}()
-		defer close(done)
-
-		for atomic.LoadInt32(&p.backpressureState) == int32(common.BackpressurePause) {
-			// 检查 context 是否已取消
-			select {
-			case <-p.ctx.Done():
-				return false
-			default:
-			}
-			p.backpressureCond.Wait()
+		select {
+		case <-p.resumeCh:
+			// 收到恢复信号后继续循环，重新检查状态
+		case <-p.ctx.Done():
+			return false
 		}
 	}
-
-	return true
 }
 
 // getBackpressureDelay 获取背压延迟（用于减速状态）

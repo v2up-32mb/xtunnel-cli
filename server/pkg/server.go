@@ -1,21 +1,23 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server 服务端接口
 type Server struct {
-	config   *Config
-	pool     *serverPool
-	httpSrv  *http.Server
-	cert     tls.Certificate
-	mu       sync.Mutex
-	started  bool
+	config  *Config
+	pool    *serverPool
+	httpSrv *http.Server
+	cert    tls.Certificate
+	mu      sync.Mutex
+	started bool
 }
 
 // ServerStats 服务端统计信息
@@ -105,7 +107,9 @@ func (s *Server) Shutdown() error {
 	}
 
 	if s.httpSrv != nil {
-		_ = s.httpSrv.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.httpSrv.Shutdown(ctx)
 	}
 
 	s.started = false

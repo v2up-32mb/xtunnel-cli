@@ -51,8 +51,8 @@ func TestSelectNodeExcludingFallsBackWhenNoHealthyCandidate(t *testing.T) {
 	if node == nil {
 		t.Fatalf("SelectNodeExcluding() = nil, want fallback candidate")
 	}
-	if node.IP != "better" {
-		t.Fatalf("fallback node = %q, want %q", node.IP, "better")
+	if node.ip != "better" {
+		t.Fatalf("fallback node = %q, want %q", node.ip, "better")
 	}
 }
 
@@ -77,8 +77,8 @@ func TestSelectNodeExcludingRefreshesHostnameNodesAndReturnsNewIP(t *testing.T) 
 	if node == nil {
 		t.Fatalf("SelectNodeExcluding() = nil, want newly resolved node")
 	}
-	if node.IP != "192.0.2.20:443" {
-		t.Fatalf("selected node IP = %q, want %q", node.IP, "192.0.2.20:443")
+	if node.ip != "192.0.2.20:443" {
+		t.Fatalf("selected node IP = %q, want %q", node.ip, "192.0.2.20:443")
 	}
 	if len(m.nodes) < 2 {
 		t.Fatalf("expected refreshed node list to include new IP, got %d nodes", len(m.nodes))

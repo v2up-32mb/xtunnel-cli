@@ -28,9 +28,9 @@ type Config struct {
 	AutoCert bool   // 是否自动生成自签名证书
 
 	// WebSocket 配置
-	ReadTimeout   time.Duration // WebSocket 读超时
-	WriteTimeout  time.Duration // WebSocket 写超时
-	PingInterval  time.Duration // Ping 间隔
+	ReadTimeout      time.Duration // WebSocket 读超时
+	WriteTimeout     time.Duration // WebSocket 写超时
+	PingInterval     time.Duration // Ping 间隔
 	HandshakeTimeout time.Duration // WebSocket 握手超时
 
 	// 缓冲区配置
@@ -45,16 +45,16 @@ type Config struct {
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:       ":8443",
-		Token:            "",
-		AutoCert:         true,
-		ReadTimeout:      15 * time.Second,
-		WriteTimeout:     5 * time.Second,
-		PingInterval:     5 * time.Second,
-		HandshakeTimeout: 5 * time.Second,
-		ReadBufferSize:   64 * 1024,
-		WriteBufferSize:  64 * 1024,
-		MaxTotalChannels: 0,
+		ListenAddr:           ":8443",
+		Token:                "",
+		AutoCert:             true,
+		ReadTimeout:          15 * time.Second,
+		WriteTimeout:         5 * time.Second,
+		PingInterval:         5 * time.Second,
+		HandshakeTimeout:     5 * time.Second,
+		ReadBufferSize:       64 * 1024,
+		WriteBufferSize:      64 * 1024,
+		MaxTotalChannels:     0,
 		MaxChannelsPerClient: 0,
 	}
 }

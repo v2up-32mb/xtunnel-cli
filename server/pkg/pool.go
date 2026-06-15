@@ -16,9 +16,9 @@ import (
 
 // serverPool 服务端连接池
 type serverPool struct {
-	config *Config
-	token  string
-	mu     sync.RWMutex
+	config        *Config
+	token         string
+	mu            sync.RWMutex
 	bytesSent     uint64
 	bytesReceived uint64
 
@@ -58,11 +58,14 @@ func checkOrigin(r *http.Request) bool {
 	return true
 }
 
-// upgrader WebSocket 升级器
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  64 * 1024,
-	WriteBufferSize: 64 * 1024,
-	CheckOrigin:     checkOrigin,
+// newUpgrader 根据配置创建 WebSocket 升级器
+func (p *serverPool) newUpgrader() *websocket.Upgrader {
+	return &websocket.Upgrader{
+		ReadBufferSize:  p.config.ReadBufferSize,
+		WriteBufferSize: p.config.WriteBufferSize,
+		CheckOrigin:     checkOrigin,
+		Subprotocols:    []string{p.token},
+	}
 }
 
 // handleWebSocket 处理 WebSocket 连接
@@ -112,7 +115,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 升级为 WebSocket
-	upgrader.Subprotocols = []string{p.token}
+	upgrader := p.newUpgrader()
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[服务端] WebSocket 升级失败: %v", err)
@@ -208,8 +211,8 @@ func (p *serverPool) addReceivedBytes(n int) {
 }
 
 // handleMessage 处理消息
-func (p *serverPool) handleMessage(chID int, msgType common.MessageType, connID string, meta, payload []byte) {
-	p.addReceivedBytes(len(common.EncodeMessage(msgType, connID, meta, payload)))
+func (p *serverPool) handleMessage(chID int, rawLen int, msgType common.MessageType, connID string, meta, payload []byte) {
+	p.addReceivedBytes(rawLen)
 	switch msgType {
 	case common.MsgTCPConnect:
 		p.handleTCPConnect(chID, connID, meta)

@@ -22,6 +22,7 @@ type Config struct {
 	ServerAddr  string // WebSocket 服务器地址 (wss://...)
 	Token       string // 认证令牌
 	Connections int    // 每个 WebSocket 连接数量
+	ClientID    string // 客户端唯一标识（空则自动生成）
 
 	// 网络配置
 	DialTimeout      time.Duration // 拨号超时
@@ -33,10 +34,10 @@ type Config struct {
 	ConnectTimeout   time.Duration // 本地代理等待远端建链超时
 
 	// ECH 配置
-	EnableECH          bool          // 是否启用 ECH
-	ECHDomain          string        // ECH 查询域名
-	DNSServer          string        // DNS 服务器
-	InsecureSkipVerify bool          // 是否跳过证书验证
+	EnableECH          bool   // 是否启用 ECH
+	ECHDomain          string // ECH 查询域名
+	DNSServer          string // DNS 服务器
+	InsecureSkipVerify bool   // 是否跳过证书验证
 
 	// IP 策略
 	IPStrategy common.IPStrategy // IP 地址解析策略
@@ -58,21 +59,21 @@ type Config struct {
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *Config {
 	return &Config{
-		Connections:       3,
-		DialTimeout:       3 * time.Second,
-		HandshakeTimeout:  5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      5 * time.Second,
-		PingInterval:      5 * time.Second,
-		ReconnectDelay:    1 * time.Second,
-		ConnectTimeout:    15 * time.Second,
-		EnableECH:         true,
-		ECHDomain:         "cloudflare-ech.com",
-		DNSServer:         "https://doh.pub/dns-query",
-		IPStrategy:        common.IPStrategyDefault,
-		ReadBufferSize:    64 * 1024,
-		WriteBufferSize:   64 * 1024,
-		UDPBlockedPorts:       []int{443},
+		Connections:          3,
+		DialTimeout:          3 * time.Second,
+		HandshakeTimeout:     5 * time.Second,
+		ReadTimeout:          15 * time.Second,
+		WriteTimeout:         5 * time.Second,
+		PingInterval:         5 * time.Second,
+		ReconnectDelay:       1 * time.Second,
+		ConnectTimeout:       15 * time.Second,
+		EnableECH:            true,
+		ECHDomain:            "cloudflare-ech.com",
+		DNSServer:            "https://doh.pub/dns-query",
+		IPStrategy:           common.IPStrategyDefault,
+		ReadBufferSize:       64 * 1024,
+		WriteBufferSize:      64 * 1024,
+		UDPBlockedPorts:      []int{443},
 		MaxSOCKS5Connections: 1024, // 默认最大 1024 个并发连接
 	}
 }

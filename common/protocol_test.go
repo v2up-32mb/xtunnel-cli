@@ -72,7 +72,7 @@ func TestDecodeMessageMetaLenExceedsBuffer(t *testing.T) {
 	// metaLen=10, 但 body 只有 0 字节 (header 后无数据)
 	b := make([]byte, headerLen)
 	b[0] = byte(MsgTCPConnect)
-	b[2] = 0 // metaLen high byte
+	b[2] = 0  // metaLen high byte
 	b[3] = 10 // metaLen = 10
 	_, _, _, _, err := DecodeMessage(b)
 	if err == nil {
@@ -123,7 +123,7 @@ func TestDecodeMessageHugePayloadLenWithinBuffer(t *testing.T) {
 	payloadLen := uint32(1000)
 	b := make([]byte, headerLen+1+10)
 	b[0] = byte(MsgTCPConnect)
-	b[1] = 1       // idLen = 1
+	b[1] = 1           // idLen = 1
 	b[2], b[3] = 0, 10 // metaLen = 10
 	binary.BigEndian.PutUint32(b[4:8], payloadLen)
 	// buffer 只有 headerLen+1+10=19 字节，但声明总长度需要 1019 字节

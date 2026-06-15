@@ -412,7 +412,7 @@ func TestServerStatsCountReceivedBytesFromHandleMessage(t *testing.T) {
 		t.Fatalf("decode message failed: %v", err)
 	}
 
-	p.handleMessage(1, msgType, connID, meta, payload)
+	p.handleMessage(1, len(msg), msgType, connID, meta, payload)
 
 	if got := p.Stats().BytesReceived; got != uint64(len(msg)) {
 		t.Fatalf("expected bytes received %d, got %d", len(msg), got)
