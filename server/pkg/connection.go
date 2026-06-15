@@ -97,7 +97,7 @@ func (wsConn *ServerWSConn) readLoop() {
 			continue
 		}
 
-		wsConn.pool.handleMessage(wsConn.chID, msgType, connID, meta, payload)
+		wsConn.pool.handleMessage(wsConn.chID, len(msg), msgType, connID, meta, payload)
 	}
 }
 

@@ -40,6 +40,7 @@ type relayNodeSnapshot struct {
 	ip          string
 	score       float64
 	successRate float64
+	latency     time.Duration
 	failCount   int
 	failTime    time.Time
 }
@@ -87,6 +88,7 @@ func (m *RelayNodeManager) snapshotNode(node *RelayNode) relayNodeSnapshot {
 		ip:          node.IP,
 		score:       node.Score,
 		successRate: node.SuccessRate,
+		latency:     node.Latency,
 		failCount:   node.FailCount,
 		failTime:    node.FailTime,
 	}
@@ -287,8 +289,8 @@ func (m *RelayNodeManager) SelectBestNode() *RelayNode {
 	return snapshots[0].node
 }
 
-// SelectBestNodes 选择最多n个最佳节点
-func (m *RelayNodeManager) SelectBestNodes(n int) []*RelayNode {
+// SelectBestNodes 选择最多n个最佳节点，返回快照而非原始指针，避免调用方无锁读取可变字段。
+func (m *RelayNodeManager) SelectBestNodes(n int) []relayNodeSnapshot {
 	snapshots := m.snapshotNodes()
 	if len(snapshots) == 0 {
 		return nil
@@ -299,11 +301,7 @@ func (m *RelayNodeManager) SelectBestNodes(n int) []*RelayNode {
 	if n > len(snapshots) {
 		n = len(snapshots)
 	}
-	best := make([]*RelayNode, 0, n)
-	for _, snapshot := range snapshots[:n] {
-		best = append(best, snapshot.node)
-	}
-	return best
+	return snapshots[:n]
 }
 
 // GetNodeByIP 根据IP获取节点
@@ -447,8 +445,8 @@ func (m *RelayNodeManager) MarkNodeSuccess(ip string) {
 	node.mu.Unlock()
 }
 
-// SelectNodeExcluding 申请1个新节点,排除指定的IP列表
-func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
+// SelectNodeExcluding 申请1个新节点,排除指定的IP列表，返回快照而非原始指针。
+func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *relayNodeSnapshot {
 	excludeMap := make(map[string]bool)
 	for _, ip := range excludeIPs {
 		excludeMap[ip] = true
@@ -482,7 +480,7 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidates[i].score > candidates[j].score
 		})
-		return candidates[0].node
+		return &candidates[0]
 	}
 
 	fallback := m.snapshotNodes()
@@ -506,5 +504,5 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *RelayNode {
 		}
 		return filtered[i].ip < filtered[j].ip
 	})
-	return filtered[0].node
+	return &filtered[0]
 }

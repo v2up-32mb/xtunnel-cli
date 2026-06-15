@@ -11,18 +11,22 @@ import (
 
 // Client 客户端接口
 type Client struct {
-	config   *Config
-	pool     *clientPool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	started  bool
+	config  *Config
+	pool    *clientPool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	started bool
 }
 
 // NewClient 创建新的客户端实例
 func NewClient(cfg *Config) (*Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+
+	if cfg.ClientID == "" {
+		cfg.ClientID = uuid.NewString()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
