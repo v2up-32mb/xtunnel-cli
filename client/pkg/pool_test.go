@@ -315,6 +315,49 @@ func newClientTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn,
 	return clientConn, serverConn, cleanup
 }
 
+func TestClientPoolHasChannelNotificationChannels(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableHotPair = true
+	cfg.Connections = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p, err := newClientPool(cfg, ctx, cancel)
+	if err != nil {
+		t.Fatalf("newClientPool() error = %v", err)
+	}
+
+	if p.chReadyCh == nil {
+		t.Fatal("expected chReadyCh to be initialized")
+	}
+	if p.chInvalidCh == nil {
+		t.Fatal("expected chInvalidCh to be initialized")
+	}
+	if p.pairWarmer == nil {
+		t.Fatal("expected pairWarmer to be initialized when EnableHotPair is true")
+	}
+
+	// 验证通道有缓冲且容量正确
+	if cap(p.chReadyCh) != 64 {
+		t.Fatalf("expected chReadyCh cap 64, got %d", cap(p.chReadyCh))
+	}
+	if cap(p.chInvalidCh) != 64 {
+		t.Fatalf("expected chInvalidCh cap 64, got %d", cap(p.chInvalidCh))
+	}
+
+	// 验证未启用 HotPair 时 pairWarmer 为 nil
+	cfg2 := DefaultConfig()
+	cfg2.EnableHotPair = false
+	p2, err := newClientPool(cfg2, ctx, cancel)
+	if err != nil {
+		t.Fatalf("newClientPool() error = %v", err)
+	}
+	if p2.pairWarmer != nil {
+		t.Fatal("expected pairWarmer to be nil when EnableHotPair is false")
+	}
+}
+
 func TestClientPoolStartWaitsForECHPreparationBeforeReturning(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerAddr = "wss://127.0.0.1:1"
