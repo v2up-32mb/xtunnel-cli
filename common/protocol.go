@@ -22,7 +22,12 @@ const (
 	MsgSelectUplink
 	MsgSelectDownlink
 	MsgBackpressure
+	MsgPrebindRequest MessageType = 0x10 // 预绑定请求
+	MsgChannelReset   MessageType = 0x11 // 通道重置通知
 )
+
+// PrebindTarget 预绑定目标标识
+const PrebindTarget = "x-tunnel.prebind"
 
 // BackpressureState 背压状态
 type BackpressureState uint8

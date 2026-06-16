@@ -158,3 +158,20 @@ func TestDecodeMessagePayloadLenExceedsMaxInt(t *testing.T) {
 		t.Error("expected error for total exceeding maxInt, got nil")
 	}
 }
+
+// TestMessageTypeHasPrebindAndReset 验证 MsgPrebindRequest 和 MsgChannelReset 的值
+func TestMessageTypeHasPrebindAndReset(t *testing.T) {
+	if MsgPrebindRequest != 0x10 {
+		t.Errorf("MsgPrebindRequest: got 0x%02x, want 0x10", MsgPrebindRequest)
+	}
+	if MsgChannelReset != 0x11 {
+		t.Errorf("MsgChannelReset: got 0x%02x, want 0x11", MsgChannelReset)
+	}
+}
+
+// TestPrebindTargetConstant 验证 PrebindTarget 常量值
+func TestPrebindTargetConstant(t *testing.T) {
+	if PrebindTarget != "x-tunnel.prebind" {
+		t.Errorf("PrebindTarget: got %q, want %q", PrebindTarget, "x-tunnel.prebind")
+	}
+}
