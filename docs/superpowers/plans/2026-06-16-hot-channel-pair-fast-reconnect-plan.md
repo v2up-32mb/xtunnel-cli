@@ -14,27 +14,26 @@
 
 | 文件 | 职责 |
 |------|------|
-| `common/protocol.go` | 新增 `MsgPrebindRequest`、`MsgChannelReset` 消息类型 |
-| `common/protocol_test.go` | 新消息类型的编解码测试 |
-| `server/pkg/handler.go` | 增加 `MsgPrebindRequest` 处理分支；`handlePrebindRequest` 实现 |
-| `server/pkg/connection.go` | `MsgChannelReset` 发送；写队列延迟/堆积检测 |
-| `server/pkg/pool.go` | `handleMessage` 路由；`broadcastSelectUplink` 适配预绑定；通道就绪统计辅助 |
+| `common/protocol.go` | 新增 `MsgPrebindRequest`、`MsgChannelReset`、`PrebindTarget` 常量 |
+| `common/protocol_test.go` | 新消息类型与预绑定目标常量测试 |
+| `server/pkg/handler.go` | `handlePrebindRequest` 实现 |
+| `server/pkg/connection.go` | `MsgChannelReset` 发送；写队列满检测 |
+| `server/pkg/pool.go` | `handleMessage` 路由；`sendDownlink` 已支持预绑定复用 |
 | `server/pkg/pool_test.go` | 服务端预绑定单元测试；p.conns 不泄漏测试 |
 | `client/pkg/config.go` | 新增 Hot Pair / fast retry 配置字段与默认值 |
 | `client/pkg/pair_warmer.go` | **新增**：Pair Warmer、HotChannelPair、预绑定握手、生命周期管理 |
 | `client/pkg/pair_warmer_test.go` | **新增**：Pair Warmer 单元测试 |
-| `client/pkg/pool.go` | 集成 PairWarmer；通道就绪/失效通知；`RegisterAndBroadcastTCP` 支持 Hot Pair 路径；`handleChannel` 处理 `MsgChannelReset`；`dialAndServe` fast retry 状态机 |
-| `client/pkg/pool_test.go` | Hot Pair 集成测试；fast retry 测试 |
+| `client/pkg/pool.go` | 集成 PairWarmer；通道就绪/失效通知；`clientConnState.pair` 字段；`RegisterAndBroadcastTCP` Hot Pair 路径；`handleChannel` 处理 `MsgChannelReset`；`dialAndServe` fast retry 状态机 |
+| `client/pkg/pool_test.go` | Hot Pair 集成测试；fast retry 测试；兼容性退化测试 |
 | `client/pkg/relay.go` | 动态测速频率调整；`healthScore` |
 | `client/pkg/relay_test.go` | 健康分数与测速间隔测试 |
 | `client/cmd/x-tunnel-client/main.go` | 新增命令行参数 |
-| `client/pkg/client.go` | `Stats` 中增加 Hot Pair 统计字段（可选） |
 
 ---
 
 ## Chunk 1: 协议扩展（common/protocol.go）
 
-### Task 1.1: 新增消息类型常量
+### Task 1.1: 新增消息类型与预绑定目标常量
 
 **Files:**
 - Modify: `common/protocol.go:14-25`
@@ -51,6 +50,12 @@ func TestMessageTypeHasPrebindAndReset(t *testing.T) {
         t.Fatalf("MsgChannelReset = %d, want 0x11", common.MsgChannelReset)
     }
 }
+
+func TestPrebindTargetConstant(t *testing.T) {
+    if common.PrebindTarget != "x-tunnel.prebind" {
+        t.Fatalf("PrebindTarget = %q, want x-tunnel.prebind", common.PrebindTarget)
+    }
+}
 ```
 
 Run: `go test ./common -run TestMessageTypeHasPrebindAndReset -v`
@@ -58,7 +63,7 @@ Expected: FAIL (undefined: common.MsgPrebindRequest)
 
 - [ ] **Step 2: 实现常量**
 
-在 `common/protocol.go` 中，在 `MsgBackpressure` 后新增：
+在 `common/protocol.go` 中：
 
 ```go
 const (
@@ -75,18 +80,21 @@ const (
     MsgPrebindRequest = 0x10 // 预绑定请求
     MsgChannelReset   = 0x11 // 通道重置通知
 )
+
+// PrebindTarget 是预绑定请求中使用的占位目标地址
+const PrebindTarget = "x-tunnel.prebind"
 ```
 
 - [ ] **Step 3: 运行测试通过**
 
-Run: `go test ./common -run TestMessageTypeHasPrebindAndReset -v`
+Run: `go test ./common -run 'TestMessageTypeHasPrebindAndReset|TestPrebindTargetConstant' -v`
 Expected: PASS
 
 - [ ] **Step 4: 提交**
 
 ```bash
 git add common/protocol.go common/protocol_test.go
-git commit -m "feat(protocol): 新增 MsgPrebindRequest 与 MsgChannelReset 消息类型
+git commit -m "feat(protocol): 新增 MsgPrebindRequest、MsgChannelReset 与 PrebindTarget
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -95,32 +103,37 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Chunk 2: 服务端预绑定支持
 
-### Task 2.1: handleMessage 增加 MsgPrebindRequest 路由
+### Task 2.1: handleMessage 路由与 handlePrebindRequest 实现
 
 **Files:**
 - Modify: `server/pkg/pool.go:214-238`
+- Modify: `server/pkg/handler.go`
 - Test: `server/pkg/pool_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestHandleMessageRoutesPrebindRequest(t *testing.T) {
+func TestHandlePrebindRequestCleansUpState(t *testing.T) {
     p := newTestServerPool()
-    called := false
-    p.handlePrebindRequest = func(chID int, connID string, meta []byte) {
-        called = true
-    }
-    p.handleMessage(1, 10, common.MsgPrebindRequest, "prebind-x", []byte{0, 'x'}, nil)
-    if !called {
-        t.Fatal("handlePrebindRequest was not called")
+    connID := "prebind-test-1"
+    meta := []byte{0}
+    meta = append(meta, common.PrebindTarget...)
+
+    p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
+
+    p.mu.RLock()
+    _, exists := p.conns[connID]
+    p.mu.RUnlock()
+    if exists {
+        t.Fatal("prebind connID should be cleaned up")
     }
 }
 ```
 
-Run: `go test ./server/pkg -run TestHandleMessageRoutesPrebindRequest -v`
-Expected: FAIL (cannot assign to p.handlePrebindRequest)
+Run: `go test ./server/pkg -run TestHandlePrebindRequestCleansUpState -v`
+Expected: FAIL（MsgPrebindRequest 未处理，p.conns 仍保留或不存在）
 
-- [ ] **Step 2: 实现路由**
+- [ ] **Step 2: 实现 handleMessage 路由**
 
 修改 `server/pkg/pool.go` 的 `handleMessage`：
 
@@ -134,57 +147,12 @@ func (p *serverPool) handleMessage(chID int, rawLen int, msgType common.MessageT
     case common.MsgPrebindRequest:
         p.handlePrebindRequest(chID, connID, meta)
 
-    case common.MsgTCPData:
-        p.handleTCPData(chID, connID, payload)
-
     // ... 其他分支不变
     }
 }
 ```
 
-- [ ] **Step 3: 运行测试通过**
-
-Run: `go test ./server/pkg -run TestHandleMessageRoutesPrebindRequest -v`
-Expected: PASS
-
-- [ ] **Step 4: 提交**
-
-```bash
-git add server/pkg/pool.go server/pkg/pool_test.go
-git commit -m "feat(server): 增加 MsgPrebindRequest 消息路由
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
-### Task 2.2: 实现 handlePrebindRequest
-
-**Files:**
-- Modify: `server/pkg/handler.go`
-- Test: `server/pkg/pool_test.go`
-
-- [ ] **Step 1: 写失败测试**
-
-```go
-func TestHandlePrebindRequestCleansUpState(t *testing.T) {
-    p := newTestServerPool()
-    connID := "prebind-test-1"
-    meta := []byte{0, 'x', '-', 't', 'u', 'n', 'n', 'e', 'l', '.', 'p', 'r', 'e', 'b', 'i', 'n', 'd'}
-
-    p.handlePrebindRequest(1, connID, meta)
-
-    p.mu.RLock()
-    _, exists := p.conns[connID]
-    p.mu.RUnlock()
-    if exists {
-        t.Fatal("prebind connID should be cleaned up")
-    }
-}
-```
-
-Run: `go test ./server/pkg -run TestHandlePrebindRequestCleansUpState -v`
-Expected: FAIL (p.handlePrebindRequest undefined)
-
-- [ ] **Step 2: 实现 handlePrebindRequest**
+- [ ] **Step 3: 实现 handlePrebindRequest**
 
 在 `server/pkg/handler.go` 中，紧接 `handleTCPClose` 之后新增：
 
@@ -207,7 +175,6 @@ func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) 
         connID:     connID,
         uplinkChID: chID,
         ipStrategy: ipStrategy,
-        isPrebind:  true,
         connected:  true,
     }
     p.conns[connID] = st
@@ -230,34 +197,21 @@ func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) 
 }
 ```
 
-- [ ] **Step 3: 运行测试通过**
+- [ ] **Step 4: 运行测试通过**
 
 Run: `go test ./server/pkg -run TestHandlePrebindRequestCleansUpState -v`
 Expected: PASS
 
-- [ ] **Step 4: 提交**
-
-```bash
-git add server/pkg/handler.go server/pkg/pool_test.go
-git commit -m "feat(server): 实现 handlePrebindRequest 并立即清理预绑定状态
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
-### Task 2.3: 验证预绑定不泄漏 p.conns
-
-**Files:**
-- Test: `server/pkg/pool_test.go`
-
-- [ ] **Step 1: 写测试**
+- [ ] **Step 5: 验证预绑定不泄漏 p.conns**
 
 ```go
 func TestPrebindDoesNotLeakConns(t *testing.T) {
     p := newTestServerPool()
+    meta := []byte{0}
+    meta = append(meta, common.PrebindTarget...)
     for i := 0; i < 1000; i++ {
         connID := fmt.Sprintf("prebind-%d", i)
-        meta := []byte{0, 'x', '-', 't', 'u', 'n', 'n', 'e', 'l', '.', 'p', 'r', 'e', 'b', 'i', 'n', 'd'}
-        p.handlePrebindRequest(1, connID, meta)
+        p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
     }
     p.mu.RLock()
     n := len(p.conns)
@@ -271,11 +225,11 @@ func TestPrebindDoesNotLeakConns(t *testing.T) {
 Run: `go test ./server/pkg -run TestPrebindDoesNotLeakConns -v`
 Expected: PASS
 
-- [ ] **Step 2: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add server/pkg/pool_test.go
-git commit -m "test(server): 验证预绑定不泄漏 p.conns
+git add server/pkg/pool.go server/pkg/handler.go server/pkg/pool_test.go
+git commit -m "feat(server): 实现 MsgPrebindRequest 处理并立即清理预绑定状态
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -284,31 +238,48 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Chunk 3: 服务端 MsgChannelReset 发送
 
-### Task 3.1: 实现 notifyChannelReset
+### Task 3.1: 实现 notifyChannelReset 与队列满检测
 
 **Files:**
 - Modify: `server/pkg/connection.go`
-- Test: `server/pkg/connection_test.go`（如不存在则创建）
+- Create: `server/pkg/connection_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestNotifyChannelResetEncodesChID(t *testing.T) {
-    wsConn := &ServerWSConn{chID: 7}
-    // 需要 mock ws，这里仅验证 encode 逻辑
-    meta := make([]byte, 4)
-    binary.BigEndian.PutUint32(meta, uint32(7))
-    expected := common.EncodeMessage(common.MsgChannelReset, "", meta, nil)
-    if len(expected) == 0 {
-        t.Fatal("expected non-empty message")
+func TestAsyncWriteQueueFullSendsChannelReset(t *testing.T) {
+    p := newTestServerPool()
+    wsConn := &ServerWSConn{
+        pool:      p,
+        chID:      1,
+        writeChan: make(chan writeTask, 0),
+    }
+    resetSent := false
+    wsConn.notifyChannelReset = func() error { resetSent = true; return nil }
+
+    for i := 0; i < 3; i++ {
+        _ = wsConn.asyncWrite(websocket.BinaryMessage, make([]byte, 10))
+    }
+    if !resetSent {
+        t.Fatal("MsgChannelReset was not triggered after 3 queue-full events")
     }
 }
 ```
 
-Run: `go test ./server/pkg -run TestNotifyChannelResetEncodesChID -v`
-Expected: PASS（仅验证 encode 逻辑）
+Run: `go test ./server/pkg -run TestAsyncWriteQueueFullSendsChannelReset -v`
+Expected: FAIL（notifyChannelReset 方法不存在）
 
-- [ ] **Step 2: 实现 notifyChannelReset**
+- [ ] **Step 2: 实现 notifyChannelReset 与队列满计数**
+
+在 `ServerWSConn` 中增加：
+
+```go
+type ServerWSConn struct {
+    // ... 现有字段
+    queueFullCount int
+    lastQueueFull  time.Time
+}
+```
 
 在 `server/pkg/connection.go` 中新增方法：
 
@@ -332,85 +303,33 @@ func (wsConn *ServerWSConn) notifyChannelReset() error {
 }
 ```
 
-- [ ] **Step 3: 提交**
-
-```bash
-git add server/pkg/connection.go
-git commit -m "feat(server): 实现 notifyChannelReset
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
-### Task 3.2: 写队列延迟/堆积检测触发 MsgChannelReset
-
-**Files:**
-- Modify: `server/pkg/connection.go`（asyncWrite/writeLoop）
-
-- [ ] **Step 1: 写失败测试**
-
-由于涉及时间/异步，先写轻量单元测试验证计数器增长：
+修改 `asyncWrite` 的 `default` 分支（加锁访问计数器， unlock 在计数判断之后）：
 
 ```go
-func TestAsyncWriteQueueFullIncrementsCounter(t *testing.T) {
-    p := newTestServerPool()
-    wsConn := &ServerWSConn{
-        pool:      p,
-        chID:      1,
-        writeChan: make(chan writeTask, 1),
+default:
+    wsConn.pool.rollbackQueueBytes(size)
+
+    now := time.Now()
+    if wsConn.lastQueueFull.IsZero() || now.Sub(wsConn.lastQueueFull) > time.Second {
+        wsConn.queueFullCount = 0
     }
-    wsConn.writeChan <- writeTask{msgType: websocket.BinaryMessage, data: make([]byte, 10), size: 10}
-    _ = wsConn.asyncWrite(websocket.BinaryMessage, make([]byte, 10))
-    // 验证 queueFullCount 增加
-}
-```
-
-Run: `go test ./server/pkg -run TestAsyncWriteQueueFullIncrementsCounter -v`
-Expected: FAIL（queueFullCount 字段不存在）
-
-- [ ] **Step 2: 实现计数器与触发逻辑**
-
-在 `ServerWSConn` 中增加：
-
-```go
-type ServerWSConn struct {
-    // ... 现有字段
-    queueFullCount int32
-    lastQueueFull  time.Time
-}
-```
-
-在 `asyncWrite` 的 `default`（队列满）分支中：
-
-```go
-func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
-    // ...
-    select {
-    case queue <- writeTask{msgType: msgType, data: data, size: size}:
-        // ...
-    default:
-        wsConn.pool.rollbackQueueBytes(size)
-        wsConn.mu.Unlock()
-
-        now := time.Now()
-        if wsConn.lastQueueFull.IsZero() || now.Sub(wsConn.lastQueueFull) > time.Second {
-            wsConn.queueFullCount = 0
-        }
-        wsConn.lastQueueFull = now
-        wsConn.queueFullCount++
-        if wsConn.queueFullCount >= 3 {
-            _ = wsConn.notifyChannelReset()
-            wsConn.queueFullCount = 0
-        }
-        return fmt.Errorf("写队列满")
+    wsConn.lastQueueFull = now
+    wsConn.queueFullCount++
+    shouldReset := wsConn.queueFullCount >= 3
+    if shouldReset {
+        wsConn.queueFullCount = 0
     }
-}
-```
+    wsConn.mu.Unlock()
 
-注意：`wsConn.mu` 在 default 分支已经 unlock，因此修改 queueFullCount 时需要重新加锁。更好的做法是在 unlock 前保存相关字段。实现时应避免在 unlock 后访问未加锁字段。此处简化描述，实际代码需加锁。
+    if shouldReset {
+        _ = wsConn.notifyChannelReset()
+    }
+    return fmt.Errorf("写队列满")
+```
 
 - [ ] **Step 3: 运行测试通过**
 
-Run: `go test ./server/pkg -run TestAsyncWriteQueueFullIncrementsCounter -v`
+Run: `go test ./server/pkg -run TestAsyncWriteQueueFullSendsChannelReset -v`
 Expected: PASS
 
 - [ ] **Step 4: 提交**
@@ -430,7 +349,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `client/pkg/config.go`
-- Test: `client/pkg/pool_test.go` 或新建 `client/pkg/config_test.go`
+- Create: `client/pkg/config_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -446,6 +365,15 @@ func TestDefaultConfigHasHotPairDefaults(t *testing.T) {
     if cfg.HotPairRefreshInterval != 30*time.Second {
         t.Fatalf("HotPairRefreshInterval = %v, want 30s", cfg.HotPairRefreshInterval)
     }
+    if cfg.FastRetryAttempts != 1 {
+        t.Fatalf("FastRetryAttempts default = %d, want 1", cfg.FastRetryAttempts)
+    }
+    if cfg.FastRetryWindow != 1*time.Second {
+        t.Fatalf("FastRetryWindow = %v, want 1s", cfg.FastRetryWindow)
+    }
+    if cfg.MaxFastRetryConsecutive != 3 {
+        t.Fatalf("MaxFastRetryConsecutive default = %d, want 3", cfg.MaxFastRetryConsecutive)
+    }
 }
 ```
 
@@ -454,7 +382,7 @@ Expected: FAIL（字段不存在）
 
 - [ ] **Step 2: 实现配置字段**
 
-修改 `client/pkg/config.go` 的 `Config` 结构体：
+修改 `client/pkg/config.go`：
 
 ```go
 type Config struct {
@@ -466,9 +394,9 @@ type Config struct {
     HotPairRefreshInterval time.Duration // Pair 刷新间隔，默认 30s
 
     // 快速重连配置
-    FastRetryAttempts    int           // 快速重试次数，默认 1
-    FastRetryWindow      time.Duration // 快速重试窗口，默认 1s
-    MaxFastRetryConsecutive int        // 连续进入 fast retry 的最大次数，默认 3
+    FastRetryAttempts       int           // 快速重试次数，默认 1
+    FastRetryWindow         time.Duration // 快速重试窗口，默认 1s
+    MaxFastRetryConsecutive int           // 连续进入 fast retry 的最大次数，默认 3
 }
 ```
 
@@ -478,11 +406,11 @@ type Config struct {
 func DefaultConfig() *Config {
     return &Config{
         // ... 现有默认值
-        EnableHotPair:          false,
-        HotPairCount:           1,
-        HotPairRefreshInterval: 30 * time.Second,
-        FastRetryAttempts:      1,
-        FastRetryWindow:        1 * time.Second,
+        EnableHotPair:           false,
+        HotPairCount:            1,
+        HotPairRefreshInterval:  30 * time.Second,
+        FastRetryAttempts:       1,
+        FastRetryWindow:         1 * time.Second,
         MaxFastRetryConsecutive: 3,
     }
 }
@@ -496,7 +424,7 @@ Expected: PASS
 - [ ] **Step 4: 提交**
 
 ```bash
-git add client/pkg/config.go
+git add client/pkg/config.go client/pkg/config_test.go
 git commit -m "feat(client/config): 新增 Hot Pair 与 fast retry 配置字段
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -507,7 +435,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:**
 - Modify: `client/cmd/x-tunnel-client/main.go`
 
-- [ ] **Step 1: 实现参数注册**
+- [ ] **Step 1: 实现参数注册与解析**
 
 在 `registerFlags` 中新增：
 
@@ -520,7 +448,7 @@ fs.DurationVar(&fastRetryWindow, "fast-retry-window", 1*time.Second, "快速重�
 fs.IntVar(&maxFastRetryConsecutive, "fast-retry-consecutive", 3, "连续进入快速重试的最大次数")
 ```
 
-新增包级变量：
+新增包级变量并赋值：
 
 ```go
 var (
@@ -534,7 +462,7 @@ var (
 )
 ```
 
-在 `parseFlags` 中赋值给 `cfg`：
+在 `parseFlags` 中：
 
 ```go
 cfg.EnableHotPair = enableHotPair
@@ -567,7 +495,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `client/pkg/pair_warmer.go`
-- Test: `client/pkg/pair_warmer_test.go`
+- Create: `client/pkg/pair_warmer_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -614,9 +542,17 @@ type HotChannelPair struct {
     ID           string
     UplinkChID   int
     DownlinkChID int
-    state        int
+    state        int32
     createdAt    time.Time
     refs         int32
+}
+
+func (p *HotChannelPair) State() int {
+    return int(atomic.LoadInt32(&p.state))
+}
+
+func (p *HotChannelPair) setState(s int) {
+    atomic.StoreInt32(&p.state, int32(s))
 }
 
 // PairWarmerConfig Pair Warmer 配置
@@ -635,6 +571,15 @@ type PairWarmer struct {
     config  PairWarmerConfig
     ctx     context.Context
     cancel  context.CancelFunc
+
+    prebindResultCh chan prebindResult
+}
+
+type prebindResult struct {
+    connID       string
+    uplinkChID   int
+    downlinkChID int
+    err          error
 }
 
 // NewPairWarmer 创建 Pair Warmer
@@ -647,8 +592,9 @@ func NewPairWarmer(pool *clientPool, cfg *Config) *PairWarmer {
             RefreshInterval: cfg.HotPairRefreshInterval,
             PrebindTimeout:  3 * time.Second,
         },
-        ctx:    ctx,
-        cancel: cancel,
+        ctx:             ctx,
+        cancel:          cancel,
+        prebindResultCh: make(chan prebindResult, 8),
     }
 }
 ```
@@ -667,7 +613,7 @@ git commit -m "feat(client): 创建 PairWarmer 骨架
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-### Task 5.2: 实现 AcquirePrimary / Release / Invalidate
+### Task 5.2: 实现 AcquirePrimary / Release / Invalidate / CloseIfEmpty
 
 **Files:**
 - Modify: `client/pkg/pair_warmer.go`
@@ -676,13 +622,14 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestPairWarmerAcquirePrimary(t *testing.T) {
+func TestPairWarmerAcquireReleaseAndClose(t *testing.T) {
     cfg := client.DefaultConfig()
     cfg.EnableHotPair = true
     pool := &clientPool{config: cfg}
     warmer := client.NewPairWarmer(pool, cfg)
 
-    pair := &client.HotChannelPair{ID: "p1", UplinkChID: 1, DownlinkChID: 2, state: client.PairStateReady}
+    pair := &client.HotChannelPair{ID: "p1", UplinkChID: 1, DownlinkChID: 2}
+    pair.SetStateForTest(client.PairStateReady)
     warmer.SetPrimaryForTest(pair)
 
     acquired := warmer.AcquirePrimary()
@@ -692,10 +639,18 @@ func TestPairWarmerAcquirePrimary(t *testing.T) {
     if atomic.LoadInt32(&acquired.refs) != 1 {
         t.Fatalf("refs = %d, want 1", atomic.LoadInt32(&acquired.refs))
     }
+
+    warmer.ReleasePair(acquired)
+    if atomic.LoadInt32(&acquired.refs) != 0 {
+        t.Fatalf("refs after release = %d, want 0", atomic.LoadInt32(&acquired.refs))
+    }
+    if acquired.State() != client.PairStateClosed {
+        t.Fatalf("state = %d, want closed", acquired.State())
+    }
 }
 ```
 
-Run: `go test ./client/pkg -run TestPairWarmerAcquirePrimary -v`
+Run: `go test ./client/pkg -run TestPairWarmerAcquireReleaseAndClose -v`
 Expected: FAIL（方法不存在）
 
 - [ ] **Step 2: 实现方法**
@@ -708,19 +663,38 @@ func (w *PairWarmer) AcquirePrimary() *HotChannelPair {
     w.mu.RLock()
     pair := w.primary
     w.mu.RUnlock()
-    if pair == nil || pair.state != PairStateReady {
+    if pair == nil || pair.State() != PairStateReady {
         return nil
     }
     atomic.AddInt32(&pair.refs, 1)
     return pair
 }
 
-// ReleasePair 减少 Pair 引用计数
+// ReleasePair 减少 Pair 引用计数；若 Pair 已 draining 且 refs 归零则标记 closed
 func (w *PairWarmer) ReleasePair(pair *HotChannelPair) {
     if pair == nil {
         return
     }
-    atomic.AddInt32(&pair.refs, -1)
+    refs := atomic.AddInt32(&pair.refs, -1)
+    if refs <= 0 && pair.State() == PairStateDraining {
+        pair.setState(PairStateClosed)
+        w.removePair(pair)
+    }
+}
+
+// removePair 从池中移除 Pair
+func (w *PairWarmer) removePair(pair *HotChannelPair) {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    for i, p := range w.pairs {
+        if p == pair {
+            w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
+            break
+        }
+    }
+    if w.primary == pair {
+        w.primary = nil
+    }
 }
 
 // InvalidateChannel 废弃包含指定通道的所有 Pair
@@ -728,19 +702,24 @@ func (w *PairWarmer) InvalidateChannel(chID int) {
     w.mu.Lock()
     defer w.mu.Unlock()
     for _, pair := range w.pairs {
-        if pair.state == PairStateClosed {
+        if pair.State() == PairStateClosed {
             continue
         }
         if pair.UplinkChID == chID || pair.DownlinkChID == chID {
-            pair.state = PairStateDraining
-            if w.primary == pair {
+            pair.setState(PairStateDraining)
+            if pair.refs <= 0 {
+                pair.setState(PairStateClosed)
+                w.removePair(pair)
+            } else if w.primary == pair {
                 w.primary = nil
             }
         }
     }
 }
 
-// 仅用于测试
+// 仅用于测试的辅助方法
+func (p *HotChannelPair) SetStateForTest(s int) { p.setState(s) }
+
 func (w *PairWarmer) SetPrimaryForTest(pair *HotChannelPair) {
     w.mu.Lock()
     w.primary = pair
@@ -751,49 +730,55 @@ func (w *PairWarmer) SetPrimaryForTest(pair *HotChannelPair) {
 
 - [ ] **Step 3: 运行测试通过**
 
-Run: `go test ./client/pkg -run TestPairWarmerAcquirePrimary -v`
+Run: `go test ./client/pkg -run TestPairWarmerAcquireReleaseAndClose -v`
 Expected: PASS
 
 - [ ] **Step 4: 提交**
 
 ```bash
 git add client/pkg/pair_warmer.go client/pkg/pair_warmer_test.go
-git commit -m "feat(client): 实现 PairWarmer 的 Acquire/Release/Invalidate
+git commit -m "feat(client): 实现 PairWarmer 生命周期管理（Acquire/Release/Invalidate）
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-### Task 5.3: 实现预绑定握手
+### Task 5.3: 实现完整 BuildPair 与结果回调
 
 **Files:**
 - Modify: `client/pkg/pair_warmer.go`
+- Modify: `client/pkg/pool.go`（handleChannel 转发预绑定结果）
 - Test: `client/pkg/pair_warmer_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestPairWarmerBuildPairUsesPrebindPrefix(t *testing.T) {
+func TestPairWarmerBuildPairReturnsOnResult(t *testing.T) {
     cfg := client.DefaultConfig()
     cfg.EnableHotPair = true
     pool := newTestClientPool(cfg)
     warmer := client.NewPairWarmer(pool, cfg)
 
+    go func() {
+        time.Sleep(10 * time.Millisecond)
+        warmer.HandlePrebindResult("prebind-x", 1, 2, nil)
+    }()
+
     pair, err := warmer.BuildPair([]int{1, 2})
-    if err == nil {
-        // 在单测中可能因无真实 ws 而失败，这里仅验证 connID 前缀
-        if pair != nil && !strings.HasPrefix(pair.ID, "prebind-") {
-            t.Fatalf("pair.ID should have prebind- prefix, got %s", pair.ID)
-        }
+    if err != nil {
+        t.Fatalf("BuildPair failed: %v", err)
+    }
+    if pair.UplinkChID != 1 || pair.DownlinkChID != 2 {
+        t.Fatalf("unexpected pair: %+v", pair)
     }
 }
 ```
 
-Run: `go test ./client/pkg -run TestPairWarmerBuildPairUsesPrebindPrefix -v`
-Expected: FAIL（BuildPair undefined）
+Run: `go test ./client/pkg -run TestPairWarmerBuildPairReturnsOnResult -v`
+Expected: FAIL（方法不存在）
 
-- [ ] **Step 2: 实现 BuildPair**
+- [ ] **Step 2: 实现 BuildPair 与 HandlePrebindResult**
 
-在 `pair_warmer.go` 中新增核心方法：
+在 `pair_warmer.go` 中新增：
 
 ```go
 import (
@@ -804,7 +789,7 @@ import (
     "x-tunnel/common"
 )
 
-// BuildPair 使用可用通道列表构建一个 Hot Pair
+// BuildPair 使用可用通道列表构建一个 Hot Pair，同步等待预绑定结果
 func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
     if len(available) < 2 {
         return nil, fmt.Errorf("可用通道不足")
@@ -816,31 +801,88 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
     copy(meta[1:], common.PrebindTarget)
 
     msg := common.EncodeMessage(common.MsgPrebindRequest, connID, meta, nil)
-
-    // 广播到所有可用通道
     for _, chID := range available {
         _ = w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, msg)
     }
 
-    // 等待第一个 MsgSelectUplink（通过回调或 channel）
-    // 简化：实际实现需要一个 handshake result channel
-    // 这里仅给出骨架，具体等待逻辑需要与 pool.handleChannel 配合
-    return nil, fmt.Errorf("TODO: implement handshake wait")
+    timer := time.NewTimer(w.config.PrebindTimeout)
+    defer timer.Stop()
+
+    for {
+        select {
+        case <-w.ctx.Done():
+            return nil, w.ctx.Err()
+        case <-timer.C:
+            return nil, fmt.Errorf("预绑定超时")
+        case res := <-w.prebindResultCh:
+            if res.connID != connID {
+                // 延迟的或无关的结果，继续等待
+                continue
+            }
+            if res.err != nil {
+                return nil, res.err
+            }
+            pair := &HotChannelPair{
+                ID:           connID,
+                UplinkChID:   res.uplinkChID,
+                DownlinkChID: res.downlinkChID,
+                createdAt:    time.Now(),
+            }
+            pair.setState(PairStateReady)
+            return pair, nil
+        }
+    }
+}
+
+// HandlePrebindResult 由 clientPool.handleChannel 在收到 MsgSelectUplink 时调用
+func (w *PairWarmer) HandlePrebindResult(connID string, uplinkChID, downlinkChID int, err error) {
+    select {
+    case w.prebindResultCh <- prebindResult{connID: connID, uplinkChID: uplinkChID, downlinkChID: downlinkChID, err: err}:
+    default:
+    }
 }
 ```
 
-注意：由于预绑定结果需要异步等待 `MsgSelectUplink`，`BuildPair` 不能直接同步返回。实际实现应采用 result channel + goroutine 模式。此处先给出骨架，下一 Task 与 pool.handleChannel 集成。
+- [ ] **Step 3: 在 pool.handleChannel 中转发预绑定结果**
 
-- [ ] **Step 3: 运行测试**
+修改 `client/pkg/pool.go` 的 `handleChannel`，在 `common.MsgSelectUplink` 分支中：
 
-Run: `go test ./client/pkg -run TestPairWarmerBuildPairUsesPrebindPrefix -v`
-Expected: 根据测试断言可能 PASS 或 FAIL；实现者应根据集成方式调整测试。
+```go
+case common.MsgSelectUplink:
+    var uplinkChID int
+    if len(meta) >= 4 {
+        uplinkChID = int(binary.BigEndian.Uint32(meta[0:4]))
+    } else {
+        uplinkChID = chID
+    }
+    p.noteUplink(connID, uplinkChID)
 
-- [ ] **Step 4: 提交**
+    selected, _, _, _, _, _ := p.selectDownlink(connID, chID)
+    if selected {
+        chosen := int(atomic.LoadInt32(&p.conns[connID].downlink))
+        downlinkBytes := make([]byte, 4)
+        binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
+        _ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, common.EncodeMessage(common.MsgSelectDownlink, connID, downlinkBytes, nil))
+
+        // 如果是预绑定请求，通知 PairWarmer
+        if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") {
+            p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chID, nil)
+        }
+    }
+```
+
+注意：当前 `selectDownlink` 会竞争设置 downlink，预绑定结果需要知道哪个 chID 赢得了下行。`chID` 是当前处理通道，即最快收到 MsgSelectUplink 的通道，因此下行通道就是 `chID`。
+
+- [ ] **Step 4: 运行测试通过**
+
+Run: `go test ./client/pkg -run TestPairWarmerBuildPairReturnsOnResult -v`
+Expected: PASS
+
+- [ ] **Step 5: 提交**
 
 ```bash
-git add client/pkg/pair_warmer.go client/pkg/pair_warmer_test.go
-git commit -m "feat(client): 实现 PairWarmer 预绑定握手骨架
+git add client/pkg/pair_warmer.go client/pkg/pool.go client/pkg/pair_warmer_test.go
+git commit -m "feat(client): 实现完整 BuildPair 与预绑定结果回调
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -849,7 +891,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Chunk 6: 客户端 pool 集成 PairWarmer
 
-### Task 6.1: 增加通道就绪/失效通知
+### Task 6.1: 增加通道就绪/失效通知与 clientConnState.pair 字段
 
 **Files:**
 - Modify: `client/pkg/pool.go`
@@ -857,35 +899,45 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestClientPoolChannelReadyNotification(t *testing.T) {
+func TestClientPoolHasChannelNotificationChannels(t *testing.T) {
     cfg := client.DefaultConfig()
     cfg.EnableHotPair = true
     p, _ := newClientPool(cfg, context.Background(), func() {})
-    if p.chReadyCh == nil {
-        t.Fatal("chReadyCh should not be nil")
+    if p.chReadyCh == nil || p.chInvalidCh == nil {
+        t.Fatal("notification channels should not be nil")
     }
-    if cap(p.chReadyCh) == 0 {
-        t.Fatal("chReadyCh should be buffered")
+    if cap(p.chReadyCh) == 0 || cap(p.chInvalidCh) == 0 {
+        t.Fatal("notification channels should be buffered")
     }
 }
 ```
 
-Run: `go test ./client/pkg -run TestClientPoolChannelReadyNotification -v`
+Run: `go test ./client/pkg -run TestClientPoolHasChannelNotificationChannels -v`
 Expected: FAIL（字段不存在）
 
-- [ ] **Step 2: 实现通道通知字段**
+- [ ] **Step 2: 实现字段**
 
-在 `clientPool` 结构体中新增：
+修改 `clientConnState`：
+
+```go
+type clientConnState struct {
+    // ... 现有字段
+    pair *HotChannelPair
+}
+```
+
+修改 `clientPool`：
 
 ```go
 type clientPool struct {
     // ... 现有字段
+    pairWarmer  *PairWarmer
     chReadyCh   chan int
     chInvalidCh chan int
 }
 ```
 
-在 `newClientPool` 中初始化：
+在 `newClientPool` 中：
 
 ```go
 p := &clientPool{
@@ -893,18 +945,21 @@ p := &clientPool{
     chReadyCh:   make(chan int, 64),
     chInvalidCh: make(chan int, 64),
 }
+if cfg.EnableHotPair {
+    p.pairWarmer = NewPairWarmer(p, cfg)
+}
 ```
 
 - [ ] **Step 3: 运行测试通过**
 
-Run: `go test ./client/pkg -run TestClientPoolChannelReadyNotification -v`
+Run: `go test ./client/pkg -run TestClientPoolHasChannelNotificationChannels -v`
 Expected: PASS
 
 - [ ] **Step 4: 提交**
 
 ```bash
 git add client/pkg/pool.go client/pkg/pool_test.go
-git commit -m "feat(client/pool): 增加通道就绪与失效通知通道
+git commit -m "feat(client/pool): 增加通道通知字段与 clientConnState.pair
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -929,20 +984,20 @@ default:
 }
 ```
 
-- [ ] **Step 2: 实现重连失效通知**
+- [ ] **Step 2: 实现失效通知**
 
-在 `dialAndServe` 中，每次循环开始（即重连前），如果 `lastIP` 不为空或已有连接：
+在 `dialAndServe` 中，连接断开后、重连前：
 
 ```go
-if !firstAttempt {
-    select {
-    case p.chInvalidCh <- chID:
-    default:
-    }
+// 在 handleChannel 返回后，cleanupChannel 之前
+select {
+case p.chInvalidCh <- chID:
+default:
+}
+if p.pairWarmer != nil {
+    p.pairWarmer.InvalidateChannel(chID)
 }
 ```
-
-注意：应在连接断开时立即通知，而不是在重连成功后。实现者需根据 `dialAndServe` 循环结构选择正确位置。
 
 - [ ] **Step 3: 提交**
 
@@ -961,17 +1016,18 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestRegisterAndBroadcastTCPUsesHotPair(t *testing.T) {
+func TestRegisterAndBroadcastTCPFallsBackWhenNoPair(t *testing.T) {
     cfg := client.DefaultConfig()
     cfg.EnableHotPair = true
     p, _ := newClientPool(cfg, context.Background(), func() {})
-    // 设置一个 mock PairWarmer
-    // ...
+    // 无 Pair 时退化到广播路径
+    p.RegisterAndBroadcastTCP("real-conn-1", "example.com:80", nil, nil, "TEST")
+    // 验证通过 broadcastWrite 发送（可 mock 或统计）
 }
 ```
 
-Run: `go test ./client/pkg -run TestRegisterAndBroadcastTCPUsesHotPair -v`
-Expected: 根据 mock 实现而定
+Run: `go test ./client/pkg -run TestRegisterAndBroadcastTCPFallsBackWhenNoPair -v`
+Expected: 根据测试实现而定
 
 - [ ] **Step 2: 实现 Hot Pair 路径**
 
@@ -1005,9 +1061,13 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 
     if p.config.EnableHotPair && p.pairWarmer != nil {
         pair := p.pairWarmer.AcquirePrimary()
-        if pair != nil && pair.state == PairStateReady {
-            st.pair = pair // 新增字段
-            atomic.AddInt32(&pair.refs, 1)
+        if pair != nil {
+            p.mu.Lock()
+            st = p.conns[connID]
+            if st != nil {
+                st.pair = pair
+            }
+            p.mu.Unlock()
             meta := make([]byte, 1+len(target))
             meta[0] = byte(p.config.IPStrategy)
             copy(meta[1:], target)
@@ -1022,21 +1082,23 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 }
 ```
 
-需要在 `clientConnState` 中新增 `pair *HotChannelPair` 字段。
-
 - [ ] **Step 3: Unregister 释放 Pair refs**
 
-修改 `Unregister`：
+修改 `Unregister` 开头：
 
 ```go
 func (p *clientPool) Unregister(connID string) {
     p.mu.Lock()
     st := p.conns[connID]
-    // ... 现有逻辑
-    pair := st.pair
+    // ... 现有逻辑直到 delete
+    var pair *HotChannelPair
+    if st != nil {
+        pair = st.pair
+        st.pair = nil
+    }
     p.mu.Unlock()
 
-    if pair != nil {
+    if pair != nil && p.pairWarmer != nil {
         p.pairWarmer.ReleasePair(pair)
     }
 
@@ -1048,7 +1110,7 @@ func (p *clientPool) Unregister(connID string) {
 
 ```bash
 git add client/pkg/pool.go client/pkg/pool_test.go
-git commit -m "feat(client/pool): RegisterAndBroadcastTCP 支持 Hot Pair 路径
+git commit -m "feat(client/pool): RegisterAndBroadcastTCP 支持 Hot Pair 路径与 fallback
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -1061,16 +1123,27 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestHandleChannelChannelReset(t *testing.T) {
+func TestHandleChannelChannelResetInvalidatesPair(t *testing.T) {
     cfg := client.DefaultConfig()
     cfg.EnableHotPair = true
     p, _ := newClientPool(cfg, context.Background(), func() {})
-    // 模拟收到 MsgChannelReset
+    // 构造一个 Ready 状态的 Pair
+    pair := &client.HotChannelPair{ID: "p1", UplinkChID: 1, DownlinkChID: 2}
+    pair.SetStateForTest(client.PairStateReady)
+    p.pairWarmer.SetPrimaryForTest(pair)
+
+    meta := make([]byte, 4)
+    binary.BigEndian.PutUint32(meta, uint32(1))
+    p.handleChannel(1, common.EncodeMessage(common.MsgChannelReset, "", meta, nil))
+
+    if pair.State() != client.PairStateDraining {
+        t.Fatalf("pair state = %d, want draining", pair.State())
+    }
 }
 ```
 
-Run: `go test ./client/pkg -run TestHandleChannelChannelReset -v`
-Expected: 根据实现而定
+Run: `go test ./client/pkg -run TestHandleChannelChannelResetInvalidatesPair -v`
+Expected: FAIL（handleChannel 未处理 MsgChannelReset）
 
 - [ ] **Step 2: 实现处理分支**
 
@@ -1079,18 +1152,23 @@ Expected: 根据实现而定
 ```go
 case common.MsgChannelReset:
     if len(meta) >= 4 {
-        chID := int(binary.BigEndian.Uint32(meta[0:4]))
+        resetChID := int(binary.BigEndian.Uint32(meta[0:4]))
         select {
-        case p.chInvalidCh <- chID:
+        case p.chInvalidCh <- resetChID:
         default:
         }
         if p.pairWarmer != nil {
-            p.pairWarmer.InvalidateChannel(chID)
+            p.pairWarmer.InvalidateChannel(resetChID)
         }
     }
 ```
 
-- [ ] **Step 3: 提交**
+- [ ] **Step 3: 运行测试通过**
+
+Run: `go test ./client/pkg -run TestHandleChannelChannelResetInvalidatesPair -v`
+Expected: PASS
+
+- [ ] **Step 4: 提交**
 
 ```bash
 git add client/pkg/pool.go client/pkg/pool_test.go
@@ -1099,21 +1177,74 @@ git commit -m "feat(client/pool): handleChannel 处理 MsgChannelReset
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-### Task 6.5: 启动 PairWarmer
+### Task 6.5: 启动 PairWarmer 与 Run 循环
 
 **Files:**
+- Modify: `client/pkg/pair_warmer.go`
 - Modify: `client/pkg/pool.go`
-- Modify: `client/pkg/client.go`
 
-- [ ] **Step 1: 在 newClientPool 中创建 PairWarmer**
+- [ ] **Step 1: 实现 Run 与 tryBuildPairs/tryRefresh**
+
+在 `pair_warmer.go` 中新增：
 
 ```go
-if cfg.EnableHotPair {
-    p.pairWarmer = NewPairWarmer(p, cfg)
+func (w *PairWarmer) Run() {
+    timer := time.NewTimer(w.config.RefreshInterval)
+    defer timer.Stop()
+
+    available := make(map[int]bool)
+
+    for {
+        select {
+        case <-w.ctx.Done():
+            return
+        case chID := <-w.pool.chReadyCh:
+            available[chID] = true
+            if w.primary == nil && len(available) >= w.config.PairCount*2 {
+                w.tryBuildPairs(available)
+            }
+        case chID := <-w.pool.chInvalidCh:
+            delete(available, chID)
+            w.InvalidateChannel(chID)
+            w.tryBuildPairs(available)
+        case <-timer.C:
+            w.tryRefresh(available)
+            timer.Reset(w.config.RefreshInterval)
+        }
+    }
+}
+
+func (w *PairWarmer) tryBuildPairs(available map[int]bool) {
+    if w.primary != nil && w.primary.State() == PairStateReady {
+        return
+    }
+    if len(available) < w.config.PairCount*2 {
+        return
+    }
+    ids := make([]int, 0, len(available))
+    for id := range available {
+        ids = append(ids, id)
+    }
+    pair, err := w.BuildPair(ids)
+    if err != nil {
+        log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
+        return
+    }
+    w.mu.Lock()
+    w.pairs = append(w.pairs, pair)
+    w.primary = pair
+    w.mu.Unlock()
+    log.Printf("[PairWarmer] 新 Pair 就绪: uplink=%d downlink=%d", pair.UplinkChID, pair.DownlinkChID)
+}
+
+func (w *PairWarmer) tryRefresh(available map[int]bool) {
+    // TODO: 评估当前 Pair 质量，需要时构建新 Pair
+    // 初始版本可仅在没有主 Pair 时重建
+    w.tryBuildPairs(available)
 }
 ```
 
-- [ ] **Step 2: 在 pool.Start 中启动 warmer goroutine**
+- [ ] **Step 2: 在 pool.Start 中启动 warmer**
 
 ```go
 if p.config.EnableHotPair && p.pairWarmer != nil {
@@ -1121,43 +1252,16 @@ if p.config.EnableHotPair && p.pairWarmer != nil {
 }
 ```
 
-- [ ] **Step 3: 实现 PairWarmer.Run**
+- [ ] **Step 3: 运行编译**
 
-在 `pair_warmer.go` 中：
-
-```go
-func (w *PairWarmer) Run() {
-    readyCount := 0
-    timer := time.NewTimer(w.config.RefreshInterval)
-    defer timer.Stop()
-
-    for {
-        select {
-        case <-w.ctx.Done():
-            return
-        case chID := <-w.pool.chReadyCh:
-            readyCount++
-            if readyCount >= w.config.PairCount*2 && w.primary == nil {
-                w.tryBuildPairs()
-            }
-        case chID := <-w.pool.chInvalidCh:
-            w.InvalidateChannel(chID)
-            w.tryBuildPairs()
-        case <-timer.C:
-            w.tryRefresh()
-            timer.Reset(w.config.RefreshInterval)
-        }
-    }
-}
-```
-
-`tryBuildPairs` 和 `tryRefresh` 的具体实现依赖 BuildPair 的完成。
+Run: `go build ./client/pkg`
+Expected: PASS
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add client/pkg/pair_warmer.go client/pkg/pool.go client/pkg/client.go
-git commit -m "feat(client): 启动 PairWarmer 并监听通道事件
+git add client/pkg/pair_warmer.go client/pkg/pool.go
+git commit -m "feat(client): 启动 PairWarmer Run 循环
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -1174,19 +1278,28 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写失败测试**
 
 ```go
-func TestFastRetryStateResetsOnSuccess(t *testing.T) {
+func TestFastRetryStateTransitions(t *testing.T) {
     state := &client.FastRetryState{}
     state.OnFailure()
     state.OnFailure()
+    if !state.ShouldFastRetry(3) {
+        t.Fatal("should fast retry")
+    }
+    state.OnFailure()
+    if state.ShouldFastRetry(3) {
+        t.Fatal("should not fast retry after threshold")
+    }
     state.OnSuccess()
-    if state.ConsecutiveFailures != 0 {
-        t.Fatalf("consecutive failures = %d, want 0", state.ConsecutiveFailures)
+    if !state.ShouldFastRetry(3) {
+        t.Fatal("should reset and allow fast retry")
     }
 }
 ```
 
-Run: `go test ./client/pkg -run TestFastRetryStateResetsOnSuccess -v`
-Expected: FAIL（类型不存在）
+Run: `go test ./client/pkg -run TestFastRetryStateTransitions -v`
+Expected: FAIL（FastRetryState 未导出）
+
+调整为未导出类型的测试（在同一包中测试，或提供测试辅助函数）。
 
 - [ ] **Step 2: 实现 FastRetryState**
 
@@ -1196,7 +1309,6 @@ Expected: FAIL（类型不存在）
 type fastRetryState struct {
     consecutiveFailures int
     lastFailure         time.Time
-    inFastRetry         bool
 }
 
 func (f *fastRetryState) OnFailure() {
@@ -1207,7 +1319,6 @@ func (f *fastRetryState) OnFailure() {
 func (f *fastRetryState) OnSuccess() {
     f.consecutiveFailures = 0
     f.lastFailure = time.Time{}
-    f.inFastRetry = false
 }
 
 func (f *fastRetryState) ShouldFastRetry(maxConsecutive int) bool {
@@ -1215,48 +1326,55 @@ func (f *fastRetryState) ShouldFastRetry(maxConsecutive int) bool {
 }
 ```
 
-- [ ] **Step 3: 修改 dialAndServe 使用 fast retry**
+- [ ] **Step 3: 修改 dialAndServe**
 
 在 `dialAndServe` 中：
 
 ```go
 frs := &fastRetryState{}
+fastRetryCount := 0
 
 for {
     // ...
     wsConn, err := p.dialWebSocket(chID, ip)
     if err != nil {
         frs.OnFailure()
-        if frs.ShouldFastRetry(p.config.MaxFastRetryConsecutive) {
-            // fast retry with jitter
+        if frs.ShouldFastRetry(p.config.MaxFastRetryConsecutive) && fastRetryCount < p.config.FastRetryAttempts {
+            fastRetryCount++
             jitter := time.Duration(rand.Intn(300)) * time.Millisecond
-            window := p.config.FastRetryWindow + jitter
-            // 在窗口内最多 FastRetryAttempts 次
-            // ...
-            continue
+            delay := p.config.FastRetryWindow + jitter
+            select {
+            case <-p.ctx.Done():
+                return
+            case <-time.After(delay):
+                continue
+            }
         }
-        // 进入指数退避
-        // ...
+        fastRetryCount = 0
+        // 进入指数退避 ...
     }
 
     // 连接成功
     frs.OnSuccess()
+    fastRetryCount = 0
     // ...
 }
 ```
 
-注意：`rand` 需要初始化 `rand.Seed` 或使用 `crypto/rand`。建议使用 `math/rand/v2`（Go 1.22+）或现有项目风格。
+注意：
+- 当 `slowRetryMode` 为 true 时，跳过 fast retry。
+- fast retry 次数每天窗口内重置（成功或进入指数退避时）。
 
 - [ ] **Step 4: 运行测试通过**
 
-Run: `go test ./client/pkg -run TestFastRetryStateResetsOnSuccess -v`
+Run: `go test ./client/pkg -run TestFastRetryStateTransitions -v`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add client/pkg/pool.go client/pkg/pool_test.go
-git commit -m "feat(client/pool): 实现 fast retry 状态机
+git commit -m "feat(client/pool): 实现 fast retry 状态机并与 dialAndServe 集成
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -1280,6 +1398,16 @@ func TestHealthScoreAdjustsInterval(t *testing.T) {
     interval := mgr.CurrentTestInterval()
     if interval != 15*time.Second {
         t.Fatalf("interval = %v, want 15s", interval)
+    }
+    mgr.SetHealthScore(50)
+    interval = mgr.CurrentTestInterval()
+    if interval != 30*time.Second {
+        t.Fatalf("interval = %v, want 30s", interval)
+    }
+    mgr.SetHealthScore(80)
+    interval = mgr.CurrentTestInterval()
+    if interval != 60*time.Second {
+        t.Fatalf("interval = %v, want 60s", interval)
     }
 }
 ```
@@ -1324,9 +1452,9 @@ func (m *RelayNodeManager) CurrentTestInterval() time.Duration {
 }
 ```
 
-- [ ] **Step 3: 根据失败率更新 healthScore**
+- [ ] **Step 3: 更新 healthScore**
 
-在 `testAllNodes` 或 `MarkNodeFailed/MarkNodeSuccess` 中更新：
+在 `testAllNodes` 末尾调用 `updateHealthScore()`：
 
 ```go
 func (m *RelayNodeManager) updateHealthScore() {
@@ -1348,18 +1476,23 @@ func (m *RelayNodeManager) updateHealthScore() {
 
 - [ ] **Step 4: 使用动态间隔**
 
-在 `Start` 中：
+将 `speedTestLoop` 改为 `time.Timer` 模式，每次循环后重置间隔：
 
 ```go
-func (m *RelayNodeManager) Start() {
-    // ...
-    interval := m.CurrentTestInterval()
-    m.testTimer = time.NewTicker(interval)
-    go m.speedTestLoop()
+func (m *RelayNodeManager) speedTestLoop() {
+    timer := time.NewTimer(m.CurrentTestInterval())
+    defer timer.Stop()
+    for {
+        select {
+        case <-m.ctx.Done():
+            return
+        case <-timer.C:
+            m.testAllNodes()
+            timer.Reset(m.CurrentTestInterval())
+        }
+    }
 }
 ```
-
-`speedTestLoop` 每次循环结束后重新计算间隔（因为 `time.Ticker` 不能改间隔，需改用 `time.Timer` 或每次重置 Ticker）。
 
 - [ ] **Step 5: 运行测试通过**
 
@@ -1379,7 +1512,39 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Chunk 9: 集成测试与验证
 
-### Task 9.1: 端到端 Hot Pair 集成测试
+### Task 9.1: 服务端预绑定集成测试
+
+**Files:**
+- Test: `server/pkg/pool_test.go`
+
+- [ ] **Step 1: 写测试**
+
+```go
+func TestPrebindSendsSelectUplink(t *testing.T) {
+    p := newTestServerPool()
+    // 创建 mock wsConn 并注册到 p.chConns
+    // 发送 MsgPrebindRequest
+    // 验证 p.sendDownlink 被调用且携带 MsgSelectUplink
+}
+```
+
+Run: `go test ./server/pkg -run TestPrebindSendsSelectUplink -v`
+Expected: 根据 mock 实现而定
+
+- [ ] **Step 2: 实现 mock helper**
+
+在 `server/pkg/pool_test.go` 中实现可复用的 `newTestServerPool` 与 mock WebSocket 连接（如尚未存在）。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add server/pkg/pool_test.go
+git commit -m "test(server): 添加预绑定集成测试
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+### Task 9.2: 客户端 Hot Pair 集成与退化测试
 
 **Files:**
 - Test: `client/pkg/pool_test.go`
@@ -1387,31 +1552,48 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 写测试**
 
 ```go
-func TestHotPairReducesFirstFrameLatency(t *testing.T) {
-    // 启动本地 mock server（可使用 httptest + websocket.Upgrader）
-    // 配置 client.EnableHotPair = true
-    // 触发 SOCKS5/HTTP 请求
-    // 验证首条 MsgTCPConnect 直接通过单一通道发送，而非广播
+func TestHotPairAcquireAndChannelInvalidation(t *testing.T) {
+    cfg := client.DefaultConfig()
+    cfg.EnableHotPair = true
+    p, _ := newClientPool(cfg, context.Background(), func() {})
+    pair := &client.HotChannelPair{ID: "p1", UplinkChID: 1, DownlinkChID: 2}
+    pair.SetStateForTest(client.PairStateReady)
+    p.pairWarmer.SetPrimaryForTest(pair)
+
+    acquired := p.pairWarmer.AcquirePrimary()
+    if acquired == nil {
+        t.Fatal("should acquire pair")
+    }
+    p.pairWarmer.InvalidateChannel(1)
+    if pair.State() != client.PairStateDraining {
+        t.Fatalf("state = %d, want draining", pair.State())
+    }
+}
+
+func TestRegisterAndBroadcastTCPFallsBackToBroadcast(t *testing.T) {
+    cfg := client.DefaultConfig()
+    cfg.EnableHotPair = true
+    p, _ := newClientPool(cfg, context.Background(), func() {})
+    // 未设置 Pair，应走广播路径
+    // 验证 broadcastWrite 被调用
 }
 ```
 
-Run: `go test ./client/pkg -run TestHotPairReducesFirstFrameLatency -v`
-Expected: 根据 mock 实现而定
+- [ ] **Step 2: 运行测试通过**
 
-- [ ] **Step 2: 实现 mock server helper**
-
-在 `client/pkg/pool_test.go` 或 `client/pkg/test_helpers.go` 中创建可复用的 mock WebSocket server，用于测试预绑定和 Hot Pair 路径。
+Run: `go test ./client/pkg -run 'TestHotPair|TestRegisterAndBroadcast' -v`
+Expected: PASS
 
 - [ ] **Step 3: 提交**
 
 ```bash
 git add client/pkg/pool_test.go
-git commit -m "test(client): 添加 Hot Pair 端到端集成测试
+git commit -m "test(client): 添加 Hot Pair 与退化路径测试
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-### Task 9.2: 编译与完整测试
+### Task 9.3: 完整测试与编译
 
 - [ ] **Step 1: 编译客户端和服务端**
 
@@ -1428,7 +1610,7 @@ Expected: 两者都 PASS
 go test ./...
 ```
 
-Expected: 所有测试 PASS（或仅已知失败）
+Expected: 所有测试 PASS
 
 - [ ] **Step 3: 提交**
 
@@ -1443,12 +1625,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Plan Review Loop
 
-每个 Chunk 完成后，应 dispatch plan-document-reviewer 进行评审，确保：
+每个 Chunk 完成后，应 dispatch plan-document-reviewer 进行评审，重点检查：
 
-1. 文件路径和修改位置正确。
-2. 测试用例覆盖了关键风险点。
-3. 没有与现有代码风格冲突的地方。
-4. 实现顺序合理，不会产生循环依赖。
+1. 文件路径和修改位置是否正确。
+2. 测试是否覆盖了关键风险点（p.conns 泄漏、Pair refs 归零、通道失效、fast retry 阈值、healthScore 区间）。
+3. 锁的使用是否安全（特别是 `asyncWrite` 计数器、`pair.state` 原子操作）。
+4. 实现顺序是否会产生循环依赖。
 
 如果 reviewer 提出 issues，修复后重新 dispatch，最多 5 次迭代。
 
