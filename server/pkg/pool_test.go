@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,49 @@ import (
 	"github.com/gorilla/websocket"
 	"x-tunnel/common"
 )
+
+func newTestServerPool() *serverPool {
+	return &serverPool{
+		config:            DefaultConfig(),
+		conns:             make(map[string]*ServerConnState),
+		wsConns:           make([]*ServerWSConn, 0),
+		chConns:           make(map[int]*ServerWSConn),
+		globalQueueLimit:  1024,
+		backpressureState: int32(common.BackpressureNormal),
+	}
+}
+
+func TestHandlePrebindRequestCleansUpState(t *testing.T) {
+	p := newTestServerPool()
+	connID := "prebind-test-1"
+	meta := []byte{0}
+	meta = append(meta, common.PrebindTarget...)
+
+	p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
+
+	p.mu.RLock()
+	_, exists := p.conns[connID]
+	p.mu.RUnlock()
+	if exists {
+		t.Fatal("prebind connID should be cleaned up")
+	}
+}
+
+func TestPrebindDoesNotLeakConns(t *testing.T) {
+	p := newTestServerPool()
+	meta := []byte{0}
+	meta = append(meta, common.PrebindTarget...)
+	for i := 0; i < 1000; i++ {
+		connID := fmt.Sprintf("prebind-%d", i)
+		p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
+	}
+	p.mu.RLock()
+	n := len(p.conns)
+	p.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("expected 0 conns after prebind, got %d", n)
+	}
+}
 
 func TestCheckOriginDefaultAllow(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "https://example.com/ws", nil)

@@ -229,6 +229,45 @@ func (p *serverPool) handleTCPClose(chID int, connID string) {
 	p.unregisterConn(connID)
 }
 
+// handlePrebindRequest 处理预绑定请求
+func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) {
+	if len(meta) < 1 {
+		return
+	}
+
+	ipStrategy := common.IPStrategy(meta[0])
+
+	p.mu.Lock()
+	if _, exists := p.conns[connID]; exists {
+		p.mu.Unlock()
+		return
+	}
+
+	st := &ServerConnState{
+		connID:     connID,
+		uplinkChID: chID,
+		ipStrategy: ipStrategy,
+		connected:  true,
+	}
+	p.conns[connID] = st
+	p.mu.Unlock()
+
+	p.mu.RLock()
+	wsConn := p.chConns[chID]
+	p.mu.RUnlock()
+	if wsConn != nil {
+		st.clientID = wsConn.clientID
+		st.clientAddr = wsConn.remoteAddr
+	}
+
+	uplinkChIDBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
+	_ = p.sendDownlink(connID, common.MsgSelectUplink, uplinkChIDBytes, nil)
+
+	// 预绑定只完成上行选择，立即清理状态，避免泄漏
+	p.unregisterConn(connID)
+}
+
 // forwardTargetToClient 转发目标→客户端数据
 func (p *serverPool) forwardTargetToClient(st *ServerConnState) {
 	defer p.unregisterConn(st.connID)
