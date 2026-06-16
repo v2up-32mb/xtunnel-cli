@@ -226,6 +226,9 @@ func (p *serverPool) handleMessage(chID int, rawLen int, msgType common.MessageT
 	case common.MsgTCPClose:
 		p.handleTCPClose(chID, connID)
 
+	case common.MsgPrebindRequest:
+		p.handlePrebindRequest(chID, connID, meta)
+
 	case common.MsgUDPConnect:
 		p.handleUDPConnect(chID, connID, meta)
 
