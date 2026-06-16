@@ -1196,6 +1196,18 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				state := common.BackpressureState(meta[0])
 				p.handleBackpressure(state)
 			}
+
+		case common.MsgChannelReset:
+			if len(meta) >= 4 {
+				resetChID := int(binary.BigEndian.Uint32(meta[0:4]))
+				select {
+				case p.chInvalidCh <- resetChID:
+				default:
+				}
+				if p.pairWarmer != nil {
+					p.pairWarmer.InvalidateChannel(resetChID)
+				}
+			}
 		}
 	}
 }
