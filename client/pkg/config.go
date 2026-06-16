@@ -54,6 +54,16 @@ type Config struct {
 
 	// SOCKS5 连接限制
 	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
+
+	// Hot Pair 配置
+	EnableHotPair          bool          // 是否启用热通道对
+	HotPairCount           int           // Hot Pair 数量，默认 1
+	HotPairRefreshInterval time.Duration // Pair 刷新间隔，默认 30s
+
+	// 快速重连配置
+	FastRetryAttempts       int           // 快速重试次数，默认 1
+	FastRetryWindow         time.Duration // 快速重试窗口，默认 1s
+	MaxFastRetryConsecutive int           // 连续进入 fast retry 的最大次数，默认 3
 }
 
 // DefaultConfig 返回带有合理默认值的配置
@@ -74,7 +84,13 @@ func DefaultConfig() *Config {
 		ReadBufferSize:       64 * 1024,
 		WriteBufferSize:      64 * 1024,
 		UDPBlockedPorts:      []int{443},
-		MaxSOCKS5Connections: 1024, // 默认最大 1024 个并发连接
+		MaxSOCKS5Connections:    1024, // 默认最大 1024 个并发连接
+		EnableHotPair:           false,
+		HotPairCount:            1,
+		HotPairRefreshInterval:  30 * time.Second,
+		FastRetryAttempts:       1,
+		FastRetryWindow:         1 * time.Second,
+		MaxFastRetryConsecutive: 3,
 	}
 }
 

@@ -82,23 +82,35 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&maxSOCKS5Connections, "max-socks5-conns", 1024, "SOCKS5 最大并发连接数，0 表示无限制")
 	fs.DurationVar(&connectTimeout, "connect-timeout", 15*time.Second, "本地代理等待远端建链超时")
 	fs.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
+	fs.BoolVar(&enableHotPair, "hotpair", false, "启用 Hot Channel Pair 降低首帧延迟")
+	fs.IntVar(&hotPairCount, "hotpair-count", 1, "Hot Pair 数量")
+	fs.DurationVar(&hotPairRefreshInterval, "hotpair-refresh", 30*time.Second, "Hot Pair 刷新间隔")
+	fs.IntVar(&fastRetryAttempts, "fast-retry", 1, "快速重试次数")
+	fs.DurationVar(&fastRetryWindow, "fast-retry-window", 1*time.Second, "快速重试窗口")
+	fs.IntVar(&maxFastRetryConsecutive, "fast-retry-consecutive", 3, "连续进入快速重试的最大次数")
 }
 
 var (
-	configFile           string
-	listenAddr           string
-	forwardAddr          string
-	ipAddr               string
-	udpBlockPortsStr     string
-	token                string
-	fallback             bool
-	insecure             bool
-	connectionNum        int
-	maxSOCKS5Connections int
-	connectTimeout       time.Duration
-	ips                  string
-	dnsServer            string
-	echDomain            string
+	configFile              string
+	listenAddr              string
+	forwardAddr             string
+	ipAddr                  string
+	udpBlockPortsStr        string
+	token                   string
+	fallback                bool
+	insecure                bool
+	connectionNum           int
+	maxSOCKS5Connections    int
+	connectTimeout          time.Duration
+	ips                     string
+	dnsServer               string
+	echDomain               string
+	enableHotPair           bool
+	hotPairCount            int
+	hotPairRefreshInterval  time.Duration
+	fastRetryAttempts       int
+	fastRetryWindow         time.Duration
+	maxFastRetryConsecutive int
 )
 
 func parseFlags() *client.Config {
@@ -171,6 +183,12 @@ func parseFlags() *client.Config {
 	cfg.UDPBlockedPorts = udpBlockedPorts
 	cfg.ConnectTimeout = connectTimeout
 	cfg.MaxSOCKS5Connections = maxSOCKS5Connections
+	cfg.EnableHotPair = enableHotPair
+	cfg.HotPairCount = hotPairCount
+	cfg.HotPairRefreshInterval = hotPairRefreshInterval
+	cfg.FastRetryAttempts = fastRetryAttempts
+	cfg.FastRetryWindow = fastRetryWindow
+	cfg.MaxFastRetryConsecutive = maxFastRetryConsecutive
 
 	// 生成并复用客户端 ID
 	cfg.ClientID = uuid.NewString()
