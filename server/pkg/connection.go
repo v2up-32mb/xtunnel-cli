@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -49,6 +50,8 @@ type ServerWSConn struct {
 	mu         sync.Mutex
 	closed     bool
 	writeChan  chan writeTask
+	queueFullCount int
+	lastQueueFull  time.Time
 }
 
 // start 启动写入协程
@@ -168,9 +171,24 @@ func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
 		wsConn.mu.Unlock()
 		wsConn.pool.updateBackpressureState(newSize)
 		return nil
-	default:
+default:
 		wsConn.pool.rollbackQueueBytes(size)
+
+		now := time.Now()
+		if wsConn.lastQueueFull.IsZero() || now.Sub(wsConn.lastQueueFull) > time.Second {
+			wsConn.queueFullCount = 0
+		}
+		wsConn.lastQueueFull = now
+		wsConn.queueFullCount++
+		shouldReset := wsConn.queueFullCount >= 3
+		if shouldReset {
+			wsConn.queueFullCount = 0
+		}
 		wsConn.mu.Unlock()
+
+		if shouldReset {
+			_ = wsConn.notifyChannelReset()
+		}
 		return fmt.Errorf("写队列满")
 	}
 }
@@ -203,7 +221,21 @@ func (wsConn *ServerWSConn) writeDirect(msgType int, data []byte) error {
 	return nil
 }
 
-// close 关闭连接
+// notifyChannelReset 通知客户端该通道需要重置
+func (wsConn *ServerWSConn) notifyChannelReset() error {
+	wsConn.mu.Lock()
+	defer wsConn.mu.Unlock()
+	if wsConn.closed {
+		return nil
+	}
+	meta := make([]byte, 4)
+	binary.BigEndian.PutUint32(meta, uint32(wsConn.chID))
+	data := common.EncodeMessage(common.MsgChannelReset, "", meta, nil)
+	_ = wsConn.ws.SetWriteDeadline(time.Now().Add(wsConn.pool.config.WriteTimeout))
+	err := wsConn.ws.WriteMessage(websocket.BinaryMessage, data)
+	_ = wsConn.ws.SetWriteDeadline(time.Time{})
+	return err
+}
 func (wsConn *ServerWSConn) close() {
 	wsConn.mu.Lock()
 	if wsConn.closed {
