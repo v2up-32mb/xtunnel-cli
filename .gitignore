@@ -35,3 +35,6 @@ go.work.sum
 # 调试文件
 core
 *.core
+
+# worktree 隔离工作区
+.worktrees/
