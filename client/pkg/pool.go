@@ -353,6 +353,12 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
 
+		// 非阻塞发送就绪通知
+		select {
+		case p.chReadyCh <- chID:
+		default:
+		}
+
 		go p.writeWorker(idx, wsConn, p.writeQueues[idx])
 		p.handleChannel(chID, wsConn)
 
@@ -361,6 +367,16 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = nil
 		p.wsConnsMu.Unlock()
+
+		// 非阻塞发送失效通知
+		select {
+		case p.chInvalidCh <- chID:
+		default:
+		}
+		if p.pairWarmer != nil {
+			p.pairWarmer.InvalidateChannel(chID)
+		}
+
 		p.cleanupChannel(chID)
 
 		log.Printf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
