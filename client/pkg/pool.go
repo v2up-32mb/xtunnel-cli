@@ -172,6 +172,11 @@ func (p *clientPool) Start(relayNodes []string) {
 					go p.dialAndServe(chIdx, node.ip)
 				}
 			}
+
+			// 启动 PairWarmer（在 ECH/relay/dial 启动之后）
+			if p.config.EnableHotPair && p.pairWarmer != nil {
+				go p.pairWarmer.Run()
+			}
 			return
 		}
 
@@ -183,6 +188,11 @@ func (p *clientPool) Start(relayNodes []string) {
 	log.Printf("[客户端] 未使用中转节点,直连服务端,建立 %d 条连接", p.config.Connections)
 	for i := 0; i < p.config.Connections; i++ {
 		go p.dialAndServe(i, "")
+	}
+
+	// 启动 PairWarmer（在 ECH/relay/dial 启动之后）
+	if p.config.EnableHotPair && p.pairWarmer != nil {
+		go p.pairWarmer.Run()
 	}
 }
 
@@ -970,6 +980,20 @@ func (p *clientPool) SendUDPDataDirect(chID int, connID string, data []byte) err
 func (p *clientPool) SendUDPCloseDirect(chID int, connID string) {
 	_ = p.asyncWriteDirect(chID, websocket.BinaryMessage, common.EncodeMessage(common.MsgUDPClose, connID, nil, nil))
 	p.Unregister(connID)
+}
+
+// availableChannels 返回当前可用的通道 ID 列表（连接已就绪的通道）
+func (p *clientPool) availableChannels() []int {
+	p.wsConnsMu.RLock()
+	defer p.wsConnsMu.RUnlock()
+
+	var available []int
+	for i, c := range p.wsConns {
+		if c != nil {
+			available = append(available, i+1)
+		}
+	}
+	return available
 }
 
 // cleanupChannel 清理通道
