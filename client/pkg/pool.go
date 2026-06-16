@@ -39,6 +39,7 @@ type clientConnState struct {
 	start      time.Time
 	clientAddr string
 	closed     bool
+	pair       *HotChannelPair
 }
 
 // clientPool 客户端连接池
@@ -55,6 +56,7 @@ type clientPool struct {
 	clientID     string
 	relayManager *RelayNodeManager
 	echManager   *ECHManager
+	pairWarmer  *PairWarmer
 
 	wsConnsMu       sync.RWMutex
 	wsConns         []*websocket.Conn
@@ -70,6 +72,10 @@ type clientPool struct {
 	// 背压控制
 	backpressureState int32         // 原子操作，背压状态
 	resumeCh          chan struct{} // 背压恢复信号（带缓冲，避免发送阻塞）
+
+	// 通道就绪/失效通知（用于 PairWarmer）
+	chReadyCh   chan int
+	chInvalidCh chan int
 }
 
 // newClientPool 创建新的连接池
@@ -89,6 +95,12 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		nextChannel:       1,
 		backpressureState: int32(common.BackpressureNormal),
 		resumeCh:          make(chan struct{}, 1),
+		chReadyCh:         make(chan int, 64),
+		chInvalidCh:       make(chan int, 64),
+	}
+
+	if cfg.EnableHotPair {
+		p.pairWarmer = NewPairWarmer(p, cfg)
 	}
 
 	// 初始化 SOCKS5 连接信号量
