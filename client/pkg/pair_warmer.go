@@ -87,11 +87,17 @@ func (w *PairWarmer) AcquirePrimary() *HotChannelPair {
 	pair := w.primary
 	w.mu.RUnlock()
 
-	if pair == nil || pair.State() != PairStateReady {
+	if pair == nil {
 		return nil
 	}
 
+	// 先增加引用计数，再检查状态；若状态已非 Ready 则释放引用并返回 nil。
+	// 这样可避免状态在检查与加引用之间发生变更导致获取无效 Pair。
 	atomic.AddInt32(&pair.refs, 1)
+	if pair.State() != PairStateReady {
+		atomic.AddInt32(&pair.refs, -1)
+		return nil
+	}
 	return pair
 }
 
@@ -163,6 +169,9 @@ func (w *PairWarmer) PairCountForTest() int {
 
 // BuildPair 使用可用通道列表构建一个 Hot Pair，同步等待预绑定结果
 func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
+	if w.ctx.Err() != nil {
+		return nil, fmt.Errorf("PairWarmer 已关闭")
+	}
 	if len(available) < 2 {
 		return nil, fmt.Errorf("可用通道不足，需要至少 2 个通道")
 	}
@@ -176,11 +185,17 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	msg := common.EncodeMessage(common.MsgPrebindRequest, connID, meta, nil)
 
 	// 广播到可用通道
+	sent := 0
 	for _, chID := range available {
 		if err := w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, msg); err != nil {
 			// 记录日志但继续其他通道
 			log.Printf("[PairWarmer] 预绑定请求发送到通道 %d 失败: %v", chID, err)
+		} else {
+			sent++
 		}
+	}
+	if sent == 0 {
+		return nil, fmt.Errorf("无法发送预绑定请求到任何可用通道")
 	}
 
 	// 等待预绑定结果
@@ -197,6 +212,9 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 			if res.connID == connID {
 				if res.err != nil {
 					return nil, res.err
+				}
+				if w.ctx.Err() != nil {
+					return nil, fmt.Errorf("PairWarmer 已关闭")
 				}
 				pair := &HotChannelPair{
 					ID:           connID,
