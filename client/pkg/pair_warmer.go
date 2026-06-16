@@ -95,14 +95,14 @@ func (w *PairWarmer) AcquirePrimary() *HotChannelPair {
 	return pair
 }
 
-// ReleasePair 减少 Pair 引用计数；若 Pair 已 draining 且 refs 归零则标记 closed
+// ReleasePair 减少 Pair 引用计数；若 refs 归零则标记 closed 并从池中移除
 func (w *PairWarmer) ReleasePair(pair *HotChannelPair) {
 	if pair == nil {
 		return
 	}
 
 	refs := atomic.AddInt32(&pair.refs, -1)
-	if refs <= 0 && pair.State() == PairStateDraining {
+	if refs <= 0 && pair.State() != PairStateClosed {
 		pair.setState(PairStateClosed)
 		w.mu.Lock()
 		w.removePair(pair)
