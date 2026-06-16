@@ -249,3 +249,50 @@ func (w *PairWarmer) HandlePrebindResult(connID string, uplinkChID, downlinkChID
 	default:
 	}
 }
+
+// Run 启动 PairWarmer 主循环，监听通道就绪/失效通知并构建/刷新 Pair
+func (w *PairWarmer) Run() {
+	log.Printf("[PairWarmer] 启动运行循环")
+	defer log.Printf("[PairWarmer] 运行循环已退出")
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case chID := <-w.pool.chReadyCh:
+			w.tryBuildPairs()
+			_ = chID // 日志中可记录，但当前版本不依赖具体 chID
+		case chID := <-w.pool.chInvalidCh:
+			w.tryRefresh()
+			_ = chID
+		}
+	}
+}
+
+// tryBuildPairs 尝试构建 Hot Pair，仅在 primary 不存在或非 Ready 时执行
+func (w *PairWarmer) tryBuildPairs() {
+	w.mu.RLock()
+	primary := w.primary
+	w.mu.RUnlock()
+
+	if primary != nil && primary.State() == PairStateReady {
+		return
+	}
+
+	available := w.pool.availableChannels()
+	if len(available) < 2 {
+		return
+	}
+
+	pair, err := w.BuildPair(available)
+	if err != nil {
+		log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
+		return
+	}
+	log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
+}
+
+// tryRefresh 尝试刷新 Pair，初始版本只调用 tryBuildPairs
+func (w *PairWarmer) tryRefresh() {
+	w.tryBuildPairs()
+}
