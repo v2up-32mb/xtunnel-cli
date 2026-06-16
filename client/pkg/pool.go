@@ -727,6 +727,22 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	meta[0] = byte(p.config.IPStrategy)
 	copy(meta[1:], target)
 
+	// Hot Pair 路径：尝试获取主 Pair 并直接发送
+	if p.config.EnableHotPair && p.pairWarmer != nil {
+		pair := p.pairWarmer.AcquirePrimary()
+		if pair != nil {
+			p.mu.Lock()
+			st = p.conns[connID]
+			if st != nil {
+				st.pair = pair
+			}
+			p.mu.Unlock()
+			msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
+			_ = p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg)
+			return
+		}
+	}
+
 	msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
 	p.broadcastWrite(websocket.BinaryMessage, msg)
 }
@@ -823,6 +839,11 @@ func (p *clientPool) Unregister(connID string) {
 
 	tcpConn := st.tcpConn
 	udpAssoc := st.udpAssoc
+	var pair *HotChannelPair
+	if st != nil {
+		pair = st.pair
+		st.pair = nil
+	}
 	delete(p.conns, connID)
 	p.mu.Unlock()
 
@@ -834,6 +855,9 @@ func (p *clientPool) Unregister(connID string) {
 	}
 	if udpAssoc != nil {
 		udpAssoc.Close()
+	}
+	if p.pairWarmer != nil {
+		p.pairWarmer.ReleasePair(pair)
 	}
 }
 
