@@ -24,7 +24,7 @@
 
 ## 2. 总体评估
 
-项目整体架构清晰，模块划分合理，核心流程（WebSocket 通道竞争、上下行选择、背压控制、中转节点、ECH、SOCKS5/HTTP 代理）实现完整，单元测试覆盖协议与背压逻辑。代码质量中等偏上，但存在若干**高严重度并发与死锁风险**，必须在生产使用前修复。
+项目整体架构清晰，模块划分合理，核心流程（WebSocket 通道竞争、上下行选择、背压控制、中转节点、SOCKS5/HTTP 代理）实现完整，单元测试覆盖协议与背压逻辑。代码质量中等偏上，但存在若干**高严重度并发与死锁风险**，必须在生产使用前修复。
 
 **关键风险点**: 背压机制与读循环中的控制帧响应存在**死锁可能**；部分并发访问存在数据竞争窗口；服务端下行处理在高并发下可能成为瓶颈。
 
@@ -114,39 +114,33 @@
 - **后果**: 高吞吐长连接下，`p.mu` 成为热点，且会阻塞注册/注销/状态更新。
 - **修复建议**: 在连接建立后将 `downlink` 缓存到本地变量或 `atomic` 值中；`selectDownlink` 只在没有下行通道时调用，之后使用缓存的 `downlinkChID`。
 
-#### M3. `ECHManager.Stop()` 的 `stopped` 标志无同步保护
-
-- **位置**: `client/pkg/ech.go:167-178`
-- **描述**: `stopped` 是普通布尔字段，没有 mutex/atomic 保护。`Stop()` 通常只调用一次，但并发调用时会 data race。
-- **修复建议**: 使用 `atomic.Bool` 或 mutex 保护；或改用 `sync.Once`。
-
-#### M4. 服务端 `Shutdown()` 使用 `http.Server.Close()`，不是优雅关闭
+#### M3. 服务端 `Shutdown()` 使用 `http.Server.Close()`，不是优雅关闭
 
 - **位置**: `server/pkg/server.go:107-109`
 - **描述**: 注释称“优雅关闭”，但 `Close()` 会立即关闭所有 listener 和空闲连接，不等待活跃请求完成。
 - **修复建议**: 使用 `http.Server.Shutdown(ctx)` 并传入合理超时（例如 5-10 秒），让现有 WebSocket 通道完成握手后再关闭。
 
-#### M5. 服务端 `handleMessage` 重复编码以统计接收字节
+#### M4. 服务端 `handleMessage` 重复编码以统计接收字节
 
 - **位置**: `server/pkg/pool.go:212`
 - **描述**: `p.addReceivedBytes(len(common.EncodeMessage(...)))` 每次收到消息都重新构造完整二进制帧，只为了计算字节数。
 - **后果**: 浪费 CPU 和内存（虽然消息不大，但高频下明显）。
 - **修复建议**: 直接计算 `headerLen + len(connID) + len(meta) + len(payload)`。
 
-#### M6. 客户端 `main.go` 生成的 `clientID` 未实际使用
+#### M5. 客户端 `main.go` 生成的 `clientID` 未实际使用
 
 - **位置**: `client/cmd/x-tunnel-client/main.go:176-177`
 - **描述**: 生成了 `clientID` 并打印日志，但从未赋值给 `cfg.ClientID` 或 `pool.clientID`；真正使用的是 `clientPool` 内部 `uuid.NewString()` 生成的 ID。
 - **后果**: 日志中的 clientID 与 WebSocket 查询参数 `client_id` 不一致，误导运维排障。
 - **修复建议**: 将生成的 ID 写入 `cfg`（可增加 `ClientID` 字段）或在 `NewClient` 中允许传入；确保日志、查询参数、`pool.clientID` 一致。
 
-#### M7. 服务端 WebSocket upgrader 缓冲区未使用配置值
+#### M6. 服务端 WebSocket upgrader 缓冲区未使用配置值
 
 - **位置**: `server/pkg/pool.go:62-66` 与 `server/pkg/config.go:37-38`
 - **描述**: `websocket.Upgrader.ReadBufferSize/WriteBufferSize` 硬编码为 `64*1024`，而 `Config.ReadBufferSize/WriteBufferSize` 未被使用。
 - **修复建议**: 在 `newServerPool` 中根据 `config.ReadBufferSize/WriteBufferSize` 初始化 upgrader。
 
-#### M8. `clientConnState.closed` 跨 goroutine 访问需更严格保护
+#### M7. `clientConnState.closed` 跨 goroutine 访问需更严格保护
 
 - **位置**: `client/pkg/pool.go` 多处
 - **描述**: `clientConnState.closed` 主要在 `p.mu` 保护下访问，但 `handleChannel` 中某些路径（如 `MsgConnStatus` 失败、`MsgTCPClose`）也依赖它。服务端则统一用 `st.mu` 保护，客户端应同样明确。
@@ -220,24 +214,22 @@
 
 ### 阶段 3：资源管理与优雅关闭
 
-7. **修复 M4 服务端优雅关闭**（`server/pkg/server.go:107-109`）
+1. **修复 M4 服务端优雅关闭**（`server/pkg/server.go:107-109`）
    - 使用 `context.WithTimeout` + `s.httpSrv.Shutdown(ctx)`。
 
-8. **修复 M3 ECHManager Stop 竞态**（`client/pkg/ech.go:167-178`）
-   - 使用 `atomic.Bool` 或 `sync.Once`。
 
-9. **修复 M6 clientID 不一致**（`client/cmd/x-tunnel-client/main.go:176-177`, `client/pkg/client.go`, `client/pkg/pool.go`）
+2. **修复 M6 clientID 不一致**（`client/cmd/x-tunnel-client/main.go:176-177`, `client/pkg/client.go`, `client/pkg/pool.go`）
    - `Config` 增加 `ClientID` 字段；`NewClient` 允许覆盖或自动生成；`pool.clientID` 使用配置值。
 
 ### 阶段 4：代码质量与性能小修
 
-10. **修复 M5 重复编码**（`server/pkg/pool.go:212`）
-11. **修复 M7 upgrader 使用配置缓冲区**（`server/pkg/pool.go:62-66`）
-12. **修复 L1 恒定时间认证**（`socks5.go`, `http_proxy.go`）
-13. **修复 L2 使用 `strings.Contains`**（`common/errors.go`）
-14. **修复 L3 `ParseIPStrategy` 错误处理**（`common/ip_strategy.go`）
-15. **修复 L4 移除未使用字段**（`client/pkg/client.go`）
-16. **修复 L6 UDP 关联关闭路径**（`client/pkg/socks5.go`）
+3. **修复 M5 重复编码**（`server/pkg/pool.go:212`）
+4. **修复 M7 upgrader 使用配置缓冲区**（`server/pkg/pool.go:62-66`）
+5. **修复 L1 恒定时间认证**（`socks5.go`, `http_proxy.go`）
+6. **修复 L2 使用 `strings.Contains`**（`common/errors.go`）
+7. **修复 L3 `ParseIPStrategy` 错误处理**（`common/ip_strategy.go`）
+8. **修复 L4 移除未使用字段**（`client/pkg/client.go`）
+9. **修复 L6 UDP 关联关闭路径**（`client/pkg/socks5.go`）
 
 ---
 

@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -358,42 +357,6 @@ func TestClientPoolHasChannelNotificationChannels(t *testing.T) {
 	}
 }
 
-func TestClientPoolStartWaitsForECHPreparationBeforeReturning(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ServerAddr = "wss://127.0.0.1:1"
-	cfg.EnableECH = true
-	cfg.DNSServer = "127.0.0.1:1"
-	cfg.ECHDomain = "invalid.example"
-	cfg.Connections = 1
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	p, err := newClientPool(cfg, ctx, cancel)
-	if err != nil {
-		t.Fatalf("newClientPool() error = %v", err)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		p.Start(nil)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatalf("Start() returned before initial ECH preparation completed")
-	case <-time.After(150 * time.Millisecond):
-	}
-
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("Start() did not return after context cancellation")
-	}
-}
 
 func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 	type requestInfo struct {
@@ -418,7 +381,6 @@ func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ServerAddr = strings.Replace(server.URL, "https://", "wss://", 1)
-	cfg.EnableECH = false
 	cfg.InsecureSkipVerify = true
 	cfg.ClientID = "test-client-id"
 
@@ -462,31 +424,6 @@ func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 	}
 }
 
-func TestDialWebSocketReturnsContextErrorQuicklyWhenCancelledDuringECHRetryWait(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.ServerAddr = "wss://example.com:443"
-	cfg.EnableECH = true
-	cfg.DNSServer = "127.0.0.1:1"
-	cfg.ECHDomain = "invalid.example"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	p, err := newClientPool(cfg, ctx, cancel)
-	if err != nil {
-		t.Fatalf("newClientPool() error = %v", err)
-	}
-
-	cancel()
-	start := time.Now()
-	_, err = p.dialWebSocket(1, "")
-	elapsed := time.Since(start)
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("dialWebSocket() error = %v, want context.Canceled", err)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("dialWebSocket() returned too slowly after cancellation: %v", elapsed)
-	}
-}
 
 func TestDialAndServeStopsPromptlyWhenCancelledDuringReconnectDelay(t *testing.T) {
 	connected := make(chan struct{}, 1)
@@ -508,7 +445,6 @@ func TestDialAndServeStopsPromptlyWhenCancelledDuringReconnectDelay(t *testing.T
 
 	cfg := DefaultConfig()
 	cfg.ServerAddr = strings.Replace(server.URL, "https://", "wss://", 1)
-	cfg.EnableECH = false
 	cfg.InsecureSkipVerify = true
 	cfg.ReconnectDelay = time.Second
 	cfg.Connections = 1
@@ -561,7 +497,6 @@ func TestDialAndServeKeepsRetryingAfterRetryLimit(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ServerAddr = "wss://127.0.0.1:1"
-	cfg.EnableECH = false
 	cfg.DialTimeout = 10 * time.Millisecond
 	cfg.Connections = 1
 

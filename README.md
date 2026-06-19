@@ -1,9 +1,9 @@
 # x-tunnel
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**x-tunnel** 是一个基于 WebSocket 的高性能隧道代理系统,支持多通道连接池、SOCKS5 代理、ECH (Encrypted Client Hello) 等功能.
+**x-tunnel** 是一个基于 WebSocket 的高性能隧道代理系统,支持多通道连接池、SOCKS5 代理等功能.
 
 ## ✨ 特性
 
@@ -11,7 +11,6 @@
 - 🔒 **安全加密** - 基于 TLS 1.3 的 WebSocket 连接
 - 🌐 **SOCKS5 代理** - 完整的 SOCKS5 协议支持
 - 🔄 **智能中转** - 支持中转节点自动选择和负载均衡
-- 🎯 **ECH 支持** - 支持 Encrypted Client Hello,增强隐私保护
 - 📊 **跨平台** - 支持 Linux、Windows、macOS,多架构编译
 - 🧩 **易于集成** - 提供 Go 包,便于集成到其他项目
 
@@ -441,7 +440,6 @@ if err != nil {
 | `-n` | 并发连接数 | 3 |
 | `-insecure` | 跳过 TLS 证书验证 | false |
 | `-ip` | 中转节点列表（逗号分隔） | - |
-| `-ech` | 启用 ECH | false |
 | `-timeout` | 握手超时（秒） | 10 |
 
 ### 服务端配置
@@ -553,8 +551,7 @@ A: 检查:
 A: 可以:
 1. 增加并发连接数（`-n` 参数）
 2. 使用中转节点选择最优路径
-3. 启用 ECH 减少握手延迟
-4. 优化服务端配置
+3. 优化服务端配置
 
 ### Q: 支持哪些代理协议？
 

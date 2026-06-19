@@ -73,11 +73,8 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式,必须是 wss://host:port/path)")
 	fs.StringVar(&ipAddr, "ip", "", "指定连接 wss 的目标 IP（支持多种格式:IPv4, IPv4:PORT, IPv6, [IPv6]:PORT, 域名, 域名:PORT）,多个节点用逗号分隔")
 	fs.StringVar(&udpBlockPortsStr, "block", "443", "客户端拦截 UDP 端口列表,逗号分隔,如 443,8443")
-	fs.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验（启用后自动禁用 ECH）")
+	fs.BoolVar(&insecure, "insecure", false, "客户端 wss 模式忽略证书校验")
 	fs.StringVar(&token, "token", "", "身份验证令牌（WebSocket Subprotocol）")
-	fs.StringVar(&dnsServer, "dns", "https://v.recipes/dns-query", "查询 ECH 公钥所用的 DNS 服务器 (支持 DoH 或 UDP)")
-	fs.StringVar(&echDomain, "ech", "cloudflare-ech.com", "用于查询 ECH 公钥的域名")
-	fs.BoolVar(&fallback, "fallback", false, "是否禁用 ECH 并回落到普通 TLS 1.3 (默认 false)")
 	fs.IntVar(&connectionNum, "n", 3, "每个IP建立的WebSocket连接数量")
 	fs.IntVar(&maxSOCKS5Connections, "max-socks5-conns", 1024, "SOCKS5 最大并发连接数，0 表示无限制")
 	fs.DurationVar(&connectTimeout, "connect-timeout", 15*time.Second, "本地代理等待远端建链超时")
@@ -97,14 +94,11 @@ var (
 	ipAddr                  string
 	udpBlockPortsStr        string
 	token                   string
-	fallback                bool
 	insecure                bool
 	connectionNum           int
 	maxSOCKS5Connections    int
 	connectTimeout          time.Duration
 	ips                     string
-	dnsServer               string
-	echDomain               string
 	enableHotPair           bool
 	hotPairCount            int
 	hotPairRefreshInterval  time.Duration
@@ -160,24 +154,11 @@ func parseFlags() *client.Config {
 		}
 	}
 
-	// 处理 insecure 和 fallback
-	enableECH := !fallback
-	if insecure {
-		if !fallback {
-			fallback = true
-			log.Printf("[客户端] 启用 -insecure:已自动禁用 ECH（fallback）")
-		}
-		enableECH = false
-	}
-
 	cfg := client.DefaultConfig()
 	cfg.ServerAddr = forwardAddr
 	cfg.Token = token
 	cfg.Connections = connectionNum
 	cfg.RelayNodes = relayNodes
-	cfg.EnableECH = enableECH
-	cfg.ECHDomain = echDomain
-	cfg.DNSServer = dnsServer
 	cfg.InsecureSkipVerify = insecure
 	cfg.IPStrategy = ipStrategy
 	cfg.UDPBlockedPorts = udpBlockedPorts

@@ -56,8 +56,7 @@ type clientPool struct {
 	cancel       context.CancelFunc
 	clientID     string
 	relayManager *RelayNodeManager
-	echManager   *ECHManager
-	pairWarmer  *PairWarmer
+	pairWarmer   *PairWarmer
 
 	wsConnsMu       sync.RWMutex
 	wsConns         []*websocket.Conn
@@ -86,7 +85,6 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		ctx:               ctx,
 		cancel:            cancel,
 		clientID:          cfg.ClientID,
-		echManager:        NewECHManager(cfg, ctx),
 		relayManager:      NewRelayNodeManager(),
 		wsConns:           make([]*websocket.Conn, cfg.Connections),
 		writeQueues:       make([]chan writeJob, cfg.Connections),
@@ -118,14 +116,6 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 
 // Start 启动连接池
 func (p *clientPool) Start(relayNodes []string) {
-	// 启动 ECH 管理器（首次加载完成后再继续拨号）
-	if p.config.EnableECH {
-		if err := p.echManager.Start(); err != nil {
-			log.Printf("[客户端] ECH 启动失败: %v", err)
-			return
-		}
-	}
-
 	// 添加中转节点
 	for _, addr := range relayNodes {
 		if err := p.relayManager.AddNode(addr, "443"); err != nil {
@@ -174,7 +164,7 @@ func (p *clientPool) Start(relayNodes []string) {
 				}
 			}
 
-			// 启动 PairWarmer（在 ECH/relay/dial 启动之后）
+			// 启动 PairWarmer（在 relay/dial 启动之后）
 			if p.config.EnableHotPair && p.pairWarmer != nil {
 				go p.pairWarmer.Run()
 			}
@@ -191,7 +181,7 @@ func (p *clientPool) Start(relayNodes []string) {
 		go p.dialAndServe(i, "")
 	}
 
-	// 启动 PairWarmer（在 ECH/relay/dial 启动之后）
+	// 启动 PairWarmer（在 relay/dial 启动之后）
 	if p.config.EnableHotPair && p.pairWarmer != nil {
 		go p.pairWarmer.Run()
 	}
@@ -201,13 +191,10 @@ func (p *clientPool) Start(relayNodes []string) {
 func (p *clientPool) Shutdown() {
 	log.Printf("[客户端] 正在关闭所有连接...")
 
-	// 1. 停止 ECH 管理器
-	p.echManager.Stop()
-
-	// 2. 停止中转节点管理器
+	// 1. 停止中转节点管理器
 	p.relayManager.Stop()
 
-	// 3. 取消 context,通知所有 goroutine 退出
+	// 2. 取消 context,通知所有 goroutine 退出
 	p.cancel()
 
 	// 4. 关闭所有写队列,停止写入
