@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -300,6 +301,8 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 	// 重试控制
 	retryCount := 0
 	slowRetryMode := false
+	frs := &fastRetryState{}
+	fastRetryCount := 0
 
 	// 指数退避参数
 	currentDelay := dialAndServeBaseDelay
@@ -346,6 +349,7 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 
 		wsConn, err := p.dialWebSocket(chID, ip)
 		if err != nil {
+			frs.OnFailure()
 			retryCount++
 			if relayInfo == "" && ip != "" {
 				relayInfo = fmt.Sprintf(" [中转: %s]", ip)
@@ -356,6 +360,20 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			if ip != "" && p.relayCount > 0 {
 				p.relayManager.MarkNodeFailed(ip)
 			}
+
+			// 快速重试：在窗口内且未超过连续阈值时，使用短延迟抖动重试
+			if !slowRetryMode && frs.ShouldFastRetryWithinWindow(p.config.MaxFastRetryConsecutive, p.config.FastRetryWindow) && fastRetryCount < p.config.FastRetryAttempts {
+				fastRetryCount++
+				jitter := time.Duration(rand.Intn(300)) * time.Millisecond
+				delay := 100*time.Millisecond + jitter
+				select {
+				case <-p.ctx.Done():
+					return
+				case <-time.After(delay):
+					continue
+				}
+			}
+			fastRetryCount = 0
 
 			// 计算退避时间（指数退避）
 			if currentDelay < dialAndServeMaxDelay {
@@ -377,7 +395,9 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		// 连接成功，重置重试计数和退避时间
 		retryCount = 0
 		slowRetryMode = false
+		fastRetryCount = 0
 		currentDelay = dialAndServeBaseDelay
+		frs.OnSuccess()
 
 		// 标记节点成功
 		if ip != "" && p.relayCount > 0 {
