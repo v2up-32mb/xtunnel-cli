@@ -6,6 +6,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,12 +27,13 @@ type RelayNode struct {
 
 // RelayNodeManager 管理所有中转节点
 type RelayNodeManager struct {
-	nodes     []*RelayNode
-	mu        sync.RWMutex
-	testTimer *time.Ticker
-	ctx       context.Context
-	cancel    context.CancelFunc
-	lookupIP  func(host string) ([]net.IP, error)
+	nodes       []*RelayNode
+	mu          sync.RWMutex
+	testTimer   *time.Timer
+	ctx         context.Context
+	cancel      context.CancelFunc
+	lookupIP    func(host string) ([]net.IP, error)
+	healthScore int32
 }
 
 type relayNodeSnapshot struct {
@@ -316,13 +318,60 @@ func (m *RelayNodeManager) GetNodeByIP(ip string) *RelayNode {
 	return nil
 }
 
+// SetHealthScore 设置健康分数（0-100）
+func (m *RelayNodeManager) SetHealthScore(score int32) {
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	atomic.StoreInt32(&m.healthScore, score)
+}
+
+// GetHealthScore 获取当前健康分数
+func (m *RelayNodeManager) GetHealthScore() int32 {
+	return atomic.LoadInt32(&m.healthScore)
+}
+
+// CurrentTestInterval 根据健康分数返回当前测速间隔
+func (m *RelayNodeManager) CurrentTestInterval() time.Duration {
+	score := m.GetHealthScore()
+	switch {
+	case score < 30:
+		return 15 * time.Second
+	case score >= 70:
+		return 60 * time.Second
+	default:
+		return 30 * time.Second
+	}
+}
+
+// updateHealthScore 根据节点失败率更新健康分数
+func (m *RelayNodeManager) updateHealthScore() {
+	snapshots := m.snapshotNodes()
+	if len(snapshots) == 0 {
+		m.SetHealthScore(50)
+		return
+	}
+	var failures int
+	for _, s := range snapshots {
+		if s.failCount > 0 {
+			failures++
+		}
+	}
+	score := 100 - (failures * 100 / len(snapshots))
+	m.SetHealthScore(int32(score))
+}
+
 // Start 启动后台测速任务
 func (m *RelayNodeManager) Start() {
 	log.Printf("[客户端] 执行初始节点测速...")
 	m.testAllNodes()
+	m.updateHealthScore()
 	log.Printf("[客户端] 初始节点测速完成")
 
-	m.testTimer = time.NewTicker(30 * time.Second)
+	m.testTimer = time.NewTimer(m.CurrentTestInterval())
 	go m.speedTestLoop()
 }
 
@@ -334,6 +383,8 @@ func (m *RelayNodeManager) speedTestLoop() {
 			return
 		case <-m.testTimer.C:
 			m.testAllNodes()
+			m.updateHealthScore()
+			m.testTimer.Reset(m.CurrentTestInterval())
 		}
 	}
 }
@@ -499,10 +550,7 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *relayNodeSn
 		if filtered[i].failCount != filtered[j].failCount {
 			return filtered[i].failCount < filtered[j].failCount
 		}
-		if filtered[i].score != filtered[j].score {
-			return filtered[i].score > filtered[j].score
-		}
-		return filtered[i].ip < filtered[j].ip
+		return filtered[i].score > filtered[j].score
 	})
 	return &filtered[0]
 }
