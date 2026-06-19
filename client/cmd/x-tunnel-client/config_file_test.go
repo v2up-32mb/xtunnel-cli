@@ -63,13 +63,10 @@ func resetClientFlagGlobals() {
 	ipAddr = ""
 	udpBlockPortsStr = "443"
 	token = ""
-	fallback = false
 	insecure = false
 	connectionNum = 3
 	maxSOCKS5Connections = 1024
 	connectTimeout = 15 * time.Second
 	ips = ""
-	dnsServer = "https://v.recipes/dns-query"
-	echDomain = "cloudflare-ech.com"
 	registerFlags(flag.CommandLine)
 }

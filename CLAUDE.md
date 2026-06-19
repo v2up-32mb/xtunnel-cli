@@ -1,7 +1,7 @@
 # x-tunnel 开发计划
 
 ## 项目概述
-x-tunnel 是一个基于 WebSocket 的隧道代理系统,支持多通道连接池、SOCKS5 代理、ECH (Encrypted Client Hello) 等功能.
+x-tunnel 是一个基于 WebSocket 的隧道代理系统,支持多通道连接池、SOCKS5 代理等功能.
 
 ## 已完成
 
@@ -21,7 +21,7 @@ x-tunnel 是一个基于 WebSocket 的隧道代理系统,支持多通道连接�
 - 修复 `writeWorker` 在写入失败时立即退出
 
 **客户端优雅关闭:**
-- 添加 `context/cancel` 到 `ECHPool` 用于通知 goroutine 退出
+- 添加 `context/cancel` 到连接池用于通知 goroutine 退出
 - 实现 `Shutdown()` 方法:发送 WebSocket Close Frame (1000) 后关闭连接
 - 捕获 SIGINT/SIGTERM 信号,触发优雅关闭
 - 修改 `dialAndServe` 和 `writeWorker` 响应 context 取消
@@ -42,7 +42,7 @@ x-tunnel/
 ├── server_pool.go     # 服务端连接池和消息处理（仅 server build）
 ├── x-tunnel-client.go # 客户端入口（仅 client build）
 ├── client_pool.go     # 客户端连接池管理（仅 client build）
-├── client_dial.go     # WebSocket 连接和 ECH 配置（仅 client build）
+├── client_dial.go     # WebSocket 连接（仅 client build）
 ├── client_socks5.go   # SOCKS5 代理实现（仅 client build）
 ├── relay_manager.go   # 中转节点管理器（仅 client build）
 └── .gitignore         # Git 忽略文件
@@ -121,7 +121,7 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 
 **客户端集成:**
 - 添加 `-ip` 命令行参数支持中转节点配置
-- 在 ECHPool 中集成 RelayNodeManager
+- 在连接池中集成 RelayNodeManager
 - 在连接建立时使用最佳节点
 - 优雅关闭时停止中转节点管理器
 
@@ -130,7 +130,6 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 - [ ] 添加连接数限制
 - [ ] 添加流量统计
 - [ ] 添加配置文件支持
-- [ ] 优化 ECH 配置刷新机制
 - [ ] 添加连接超时控制
 - [ ] 支持更多代理协议 (HTTP Proxy)
 

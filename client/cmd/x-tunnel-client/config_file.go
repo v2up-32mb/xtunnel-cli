@@ -15,9 +15,6 @@ type clientFileConfig struct {
 	Block                *string `json:"block"`
 	Insecure             *bool   `json:"insecure"`
 	Token                *string `json:"token"`
-	DNS                  *string `json:"dns"`
-	ECH                  *string `json:"ech"`
-	Fallback             *bool   `json:"fallback"`
 	Connections          *int    `json:"connections"`
 	MaxSOCKS5Connections *int    `json:"max_socks5_connections"`
 	ConnectTimeout       *string `json:"connect_timeout"`
@@ -64,15 +61,6 @@ func applyClientFileConfig(path string, provided map[string]bool) error {
 	}
 	if cfg.Token != nil && !provided["token"] {
 		token = *cfg.Token
-	}
-	if cfg.DNS != nil && !provided["dns"] {
-		dnsServer = *cfg.DNS
-	}
-	if cfg.ECH != nil && !provided["ech"] {
-		echDomain = *cfg.ECH
-	}
-	if cfg.Fallback != nil && !provided["fallback"] {
-		fallback = *cfg.Fallback
 	}
 	if cfg.Connections != nil && !provided["n"] {
 		connectionNum = *cfg.Connections

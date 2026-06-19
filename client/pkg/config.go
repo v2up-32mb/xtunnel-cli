@@ -33,11 +33,7 @@ type Config struct {
 	ReconnectDelay   time.Duration // 重连延迟
 	ConnectTimeout   time.Duration // 本地代理等待远端建链超时
 
-	// ECH 配置
-	EnableECH          bool   // 是否启用 ECH
-	ECHDomain          string // ECH 查询域名
-	DNSServer          string // DNS 服务器
-	InsecureSkipVerify bool   // 是否跳过证书验证
+	InsecureSkipVerify bool // 是否跳过证书验证
 
 	// IP 策略
 	IPStrategy common.IPStrategy // IP 地址解析策略
@@ -77,9 +73,6 @@ func DefaultConfig() *Config {
 		PingInterval:         5 * time.Second,
 		ReconnectDelay:       1 * time.Second,
 		ConnectTimeout:       15 * time.Second,
-		EnableECH:            true,
-		ECHDomain:            "cloudflare-ech.com",
-		DNSServer:            "https://doh.pub/dns-query",
 		IPStrategy:           common.IPStrategyDefault,
 		ReadBufferSize:       64 * 1024,
 		WriteBufferSize:      64 * 1024,
