@@ -260,6 +260,36 @@ var (
 	dialAndServeMaxDelay   = 60 * time.Second
 )
 
+// fastRetryState 记录快速重连状态
+type fastRetryState struct {
+	consecutiveFailures int
+	lastFailure         time.Time
+}
+
+func (f *fastRetryState) OnFailure() {
+	f.consecutiveFailures++
+	f.lastFailure = time.Now()
+}
+
+func (f *fastRetryState) OnSuccess() {
+	f.consecutiveFailures = 0
+	f.lastFailure = time.Time{}
+}
+
+func (f *fastRetryState) ShouldFastRetry(maxConsecutive int) bool {
+	return f.consecutiveFailures < maxConsecutive
+}
+
+func (f *fastRetryState) ShouldFastRetryWithinWindow(maxConsecutive int, window time.Duration) bool {
+	if f.consecutiveFailures >= maxConsecutive {
+		return false
+	}
+	if f.lastFailure.IsZero() {
+		return false
+	}
+	return time.Since(f.lastFailure) <= window
+}
+
 // dialAndServe 连接并服务 WebSocket
 func (p *clientPool) dialAndServe(idx int, ip string) {
 	chID := idx + 1
