@@ -38,3 +38,7 @@ core
 
 # worktree 隔离工作区
 .worktrees/
+
+# 工具生成目录
+.claude/
+.codebase-memory/
