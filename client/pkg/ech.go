@@ -180,10 +180,6 @@ func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
 		return m.buildStandardTLSConfig(serverName)
 	}
 
-	if m.config.ECHDomain != "" && !strings.EqualFold(m.config.ECHDomain, serverName) {
-		log.Printf("[客户端] 警告: ECH 查询域名 %s 与服务端主机名 %s 不一致，可能导致 ECH 配置不匹配", m.config.ECHDomain, serverName)
-	}
-
 	ech, e := m.GetList()
 	if e != nil {
 		return nil, e
