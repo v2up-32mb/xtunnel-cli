@@ -85,7 +85,7 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&fastRetryAttempts, "fast-retry", 1, "快速重试次数")
 	fs.DurationVar(&fastRetryWindow, "fast-retry-window", 1*time.Second, "快速重试窗口")
 	fs.IntVar(&maxFastRetryConsecutive, "fast-retry-consecutive", 3, "连续进入快速重试的最大次数")
-	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 0, "全局队列背压阈值（字节），0 表示使用默认值 1MB")
+	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 1024*1024, "全局队列背压阈值（字节），默认 1MB")
 }
 
 var (
