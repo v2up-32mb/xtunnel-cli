@@ -81,34 +81,40 @@ func NewPairWarmer(pool *clientPool, cfg *Config) *PairWarmer {
 	}
 }
 
-// AcquirePrimary 获取当前主 Pair 并增加引用计数
+// AcquirePrimary 获取一个 Ready 状态的 Pair 并增加引用计数。
+// 优先返回当前 primary；若 primary 不可用，则扫描 pairs 列表。
 func (w *PairWarmer) AcquirePrimary() *HotChannelPair {
 	w.mu.RLock()
-	pair := w.primary
+	candidates := make([]*HotChannelPair, 0, len(w.pairs))
+	if w.primary != nil && w.primary.State() == PairStateReady {
+		candidates = append(candidates, w.primary)
+	}
+	for _, pair := range w.pairs {
+		if pair != w.primary && pair.State() == PairStateReady {
+			candidates = append(candidates, pair)
+		}
+	}
 	w.mu.RUnlock()
 
-	if pair == nil {
-		return nil
-	}
-
-	// 先增加引用计数，再检查状态；若状态已非 Ready 则释放引用并返回 nil。
-	// 这样可避免状态在检查与加引用之间发生变更导致获取无效 Pair。
-	atomic.AddInt32(&pair.refs, 1)
-	if pair.State() != PairStateReady {
+	for _, pair := range candidates {
+		atomic.AddInt32(&pair.refs, 1)
+		if pair.State() == PairStateReady {
+			return pair
+		}
 		atomic.AddInt32(&pair.refs, -1)
-		return nil
 	}
-	return pair
+	return nil
 }
 
-// ReleasePair 减少 Pair 引用计数；若 refs 归零则标记 closed 并从池中移除
+// ReleasePair 减少 Pair 引用计数。
+// Pair 本身保持 Ready 供后续请求复用；只有处于 Draining 状态且 refs 归零时才会移除。
 func (w *PairWarmer) ReleasePair(pair *HotChannelPair) {
 	if pair == nil {
 		return
 	}
 
 	refs := atomic.AddInt32(&pair.refs, -1)
-	if refs <= 0 && pair.State() != PairStateClosed {
+	if refs <= 0 && pair.State() == PairStateDraining && pair.State() != PairStateClosed {
 		pair.setState(PairStateClosed)
 		w.mu.Lock()
 		w.removePair(pair)
@@ -129,7 +135,8 @@ func (w *PairWarmer) removePair(pair *HotChannelPair) {
 	}
 }
 
-// InvalidateChannel 废弃包含指定通道的所有 Pair
+// InvalidateChannel 废弃包含指定通道的所有 Pair。
+// 将 Pair 标记为 Draining；若当前无请求使用（refs<=0）则立即移除，否则等待使用方释放。
 func (w *PairWarmer) InvalidateChannel(chID int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -140,7 +147,10 @@ func (w *PairWarmer) InvalidateChannel(chID int) {
 			continue
 		}
 		if pair.UplinkChID == chID || pair.DownlinkChID == chID {
-			pair.setState(PairStateDraining)
+			if pair.State() != PairStateDraining {
+				pair.setState(PairStateDraining)
+				log.Printf("[PairWarmer] Pair %s 因通道 %d 失效进入 Draining", pair.ID, chID)
+			}
 			if atomic.LoadInt32(&pair.refs) <= 0 {
 				pair.setState(PairStateClosed)
 				w.pairs = append(w.pairs[:i], w.pairs[i+1:]...)
@@ -151,6 +161,22 @@ func (w *PairWarmer) InvalidateChannel(chID int) {
 			}
 		}
 	}
+	w.ensurePrimaryLocked()
+}
+
+// ensurePrimaryLocked 在 primary 为 nil 或不可用时，从 Ready 的 Pair 中选举新的 primary。
+// 调用者需持有 mu.Lock。
+func (w *PairWarmer) ensurePrimaryLocked() {
+	if w.primary != nil && w.primary.State() == PairStateReady {
+		return
+	}
+	for _, pair := range w.pairs {
+		if pair.State() == PairStateReady {
+			w.primary = pair
+			return
+		}
+	}
+	w.primary = nil
 }
 
 // SetPrimaryForTest 仅用于测试设置主 Pair
@@ -252,7 +278,7 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 				}
 				w.mu.Lock()
 				w.pairs = append(w.pairs, pair)
-				if w.primary == nil {
+				if w.primary == nil || w.primary.State() != PairStateReady {
 					w.primary = pair
 				}
 				w.mu.Unlock()
@@ -284,6 +310,12 @@ func (w *PairWarmer) Run() {
 	log.Printf("[PairWarmer] 启动运行循环")
 	defer log.Printf("[PairWarmer] 运行循环已退出")
 
+	var refreshTicker *time.Ticker
+	if w.config.RefreshInterval > 0 {
+		refreshTicker = time.NewTicker(w.config.RefreshInterval)
+		defer refreshTicker.Stop()
+	}
+
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -294,17 +326,29 @@ func (w *PairWarmer) Run() {
 		case chID := <-w.pool.chInvalidCh:
 			w.tryRefresh()
 			_ = chID
+		case <-func() <-chan time.Time {
+			if refreshTicker == nil {
+				return nil
+			}
+			return refreshTicker.C
+		}():
+			w.periodicRefresh()
 		}
 	}
 }
 
-// tryBuildPairs 尝试构建 Hot Pair，仅在 primary 不存在或非 Ready 时执行
+// tryBuildPairs 尝试构建 Hot Pair，直到 Ready 的 Pair 数量达到 PairCount
 func (w *PairWarmer) tryBuildPairs() {
+	readyCount := 0
 	w.mu.RLock()
-	primary := w.primary
+	for _, pair := range w.pairs {
+		if pair.State() == PairStateReady {
+			readyCount++
+		}
+	}
 	w.mu.RUnlock()
 
-	if primary != nil && primary.State() == PairStateReady {
+	if readyCount >= w.config.PairCount {
 		return
 	}
 
@@ -313,15 +357,43 @@ func (w *PairWarmer) tryBuildPairs() {
 		return
 	}
 
-	pair, err := w.BuildPair(available)
-	if err != nil {
-		log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
-		return
+	for readyCount < w.config.PairCount {
+		pair, err := w.BuildPair(available)
+		if err != nil {
+			log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
+			return
+		}
+		log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
+		readyCount++
 	}
-	log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
 }
 
-// tryRefresh 尝试刷新 Pair，初始版本只调用 tryBuildPairs
+// tryRefresh 尝试刷新 Pair，当 primary 不可用时触发重建
 func (w *PairWarmer) tryRefresh() {
+	w.mu.Lock()
+	if w.primary == nil || w.primary.State() != PairStateReady {
+		w.ensurePrimaryLocked()
+	}
+	w.mu.Unlock()
+	w.tryBuildPairs()
+}
+
+// periodicRefresh 周期性刷新：评估当前 Pair 状态并尝试补充 Pair 数量
+func (w *PairWarmer) periodicRefresh() {
+	w.mu.RLock()
+	var primaryID string
+	if w.primary != nil {
+		primaryID = w.primary.ID
+	}
+	readyCount := 0
+	for _, pair := range w.pairs {
+		if pair.State() == PairStateReady {
+			readyCount++
+		}
+	}
+	w.mu.RUnlock()
+
+	log.Printf("[PairWarmer] 周期性刷新: 当前 Ready Pair 数量 %d/%d, primary=%s", readyCount, w.config.PairCount, primaryID)
+
 	w.tryBuildPairs()
 }
