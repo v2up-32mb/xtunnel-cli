@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1131,6 +1132,11 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				downlinkBytes := make([]byte, 4)
 				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
 				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, common.EncodeMessage(common.MsgSelectDownlink, connID, downlinkBytes, nil))
+
+				// 如果是预绑定请求，通知 PairWarmer 完成 Pair 构建
+				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") {
+					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chID, nil)
+				}
 			}
 
 		case common.MsgConnStatus:
