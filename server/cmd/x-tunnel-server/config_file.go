@@ -7,12 +7,13 @@ import (
 )
 
 type serverFileConfig struct {
-	Listen               *string `json:"listen"`
-	Token                *string `json:"token"`
-	CertFile             *string `json:"cert_file"`
-	KeyFile              *string `json:"key_file"`
-	MaxTotalChannels     *int    `json:"max_total_channels"`
-	MaxChannelsPerClient *int    `json:"max_channels_per_client"`
+	Listen                 *string `json:"listen"`
+	Token                  *string `json:"token"`
+	CertFile               *string `json:"cert_file"`
+	KeyFile                *string `json:"key_file"`
+	MaxTotalChannels       *int    `json:"max_total_channels"`
+	MaxChannelsPerClient   *int    `json:"max_channels_per_client"`
+	BackpressureLimitBytes *int    `json:"backpressure_limit_bytes"`
 }
 
 func visitedFlags() map[string]bool {
@@ -55,6 +56,9 @@ func applyServerFileConfig(path string, provided map[string]bool) error {
 	}
 	if cfg.MaxChannelsPerClient != nil && !provided["max-client-channels"] {
 		maxChannelsPerClient = *cfg.MaxChannelsPerClient
+	}
+	if cfg.BackpressureLimitBytes != nil && !provided["backpressure-limit"] {
+		backpressureLimitBytes = *cfg.BackpressureLimitBytes
 	}
 
 	return nil

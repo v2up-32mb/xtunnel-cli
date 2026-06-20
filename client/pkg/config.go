@@ -52,6 +52,9 @@ type Config struct {
 	ReadBufferSize  int // 读缓冲区大小
 	WriteBufferSize int // 写缓冲区大小
 
+	// 背压控制
+	BackpressureLimitBytes int // 全局队列背压阈值（字节），0 表示使用默认值 1MB
+
 	// SOCKS5 连接限制
 	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
 
@@ -83,6 +86,7 @@ func DefaultConfig() *Config {
 		IPStrategy:           common.IPStrategyDefault,
 		ReadBufferSize:       64 * 1024,
 		WriteBufferSize:      64 * 1024,
+		BackpressureLimitBytes: 1024 * 1024, // 默认 1MB
 		UDPBlockedPorts:      []int{443},
 		MaxSOCKS5Connections:    1024, // 默认最大 1024 个并发连接
 		EnableHotPair:           false,

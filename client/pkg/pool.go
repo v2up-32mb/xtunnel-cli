@@ -82,6 +82,10 @@ type clientPool struct {
 
 // newClientPool 创建新的连接池
 func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) (*clientPool, error) {
+	limit := int64(cfg.BackpressureLimitBytes)
+	if limit <= 0 {
+		limit = int64(cfg.ReadBufferSize) * 8
+	}
 	p := &clientPool{
 		config:            cfg,
 		ctx:               ctx,
@@ -93,7 +97,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 		writeQueues:       make([]chan writeJob, cfg.Connections),
 		connsWriteMutex:   make([]sync.Mutex, cfg.Connections),
 		conns:             make(map[string]*clientConnState),
-		globalQueueLimit:  int64(cfg.ReadBufferSize) * 8,
+		globalQueueLimit:  limit,
 		nextChannel:       1,
 		backpressureState: int32(common.BackpressureNormal),
 		resumeCh:          make(chan struct{}, 1),
@@ -799,6 +803,7 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 			}
 			p.mu.Unlock()
 			msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
+			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID[:16], pair.UplinkChID, pair.DownlinkChID, common.ShortID(connID))
 			_ = p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg)
 			return
 		}

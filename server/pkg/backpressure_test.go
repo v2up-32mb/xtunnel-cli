@@ -10,6 +10,7 @@ import (
 func TestBackpressureStateTransitions(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReadBufferSize = 64 * 1024
+	cfg.BackpressureLimitBytes = int(cfg.ReadBufferSize) * 8 // 测试中显式使用旧默认值
 
 	pool := newServerPool("test-token", cfg)
 
@@ -61,6 +62,7 @@ func TestBackpressureStateTransitions(t *testing.T) {
 func TestBackpressureThresholds(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ReadBufferSize = 64 * 1024 // 64KB
+	cfg.BackpressureLimitBytes = int(cfg.ReadBufferSize) * 8
 
 	pool := newServerPool("test-token", cfg)
 

@@ -9,19 +9,20 @@ import (
 )
 
 type clientFileConfig struct {
-	Listen               *string `json:"listen"`
-	Forward              *string `json:"forward"`
-	IP                   *string `json:"ip"`
-	Block                *string `json:"block"`
-	Insecure             *bool   `json:"insecure"`
-	Token                *string `json:"token"`
-	DNS                  *string `json:"dns"`
-	ECH                  *string `json:"ech"`
-	Fallback             *bool   `json:"fallback"`
-	Connections          *int    `json:"connections"`
-	MaxSOCKS5Connections *int    `json:"max_socks5_connections"`
-	ConnectTimeout       *string `json:"connect_timeout"`
-	IPs                  *string `json:"ips"`
+	Listen                 *string `json:"listen"`
+	Forward                *string `json:"forward"`
+	IP                     *string `json:"ip"`
+	Block                  *string `json:"block"`
+	Insecure               *bool   `json:"insecure"`
+	Token                  *string `json:"token"`
+	DNS                    *string `json:"dns"`
+	ECH                    *string `json:"ech"`
+	Fallback               *bool   `json:"fallback"`
+	Connections            *int    `json:"connections"`
+	MaxSOCKS5Connections   *int    `json:"max_socks5_connections"`
+	ConnectTimeout         *string `json:"connect_timeout"`
+	IPs                    *string `json:"ips"`
+	BackpressureLimitBytes *int    `json:"backpressure_limit_bytes"`
 }
 
 func visitedFlags() map[string]bool {
@@ -89,6 +90,9 @@ func applyClientFileConfig(path string, provided map[string]bool) error {
 			return fmt.Errorf("connect_timeout 无效: %w", err)
 		}
 		connectTimeout = d
+	}
+	if cfg.BackpressureLimitBytes != nil && !provided["backpressure-limit"] {
+		backpressureLimitBytes = *cfg.BackpressureLimitBytes
 	}
 
 	return nil
