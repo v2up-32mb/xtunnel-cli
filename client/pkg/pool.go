@@ -1159,14 +1159,16 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
 						clientAddr, target, up, chosen, common.ShortID(connID))
 				}
-				// 通过 uplink 通道发送 MsgSelectDownlink,meta 中携带下行通道号
+				// 通过 uplink 通道发送 MsgSelectDownlink,meta 中携带已选中的下行通道号。
+				// 注意：对于 Hot Pair 请求，chosen 是 Pair 预绑定的下行通道；
+				// 对于预绑定请求，chosen 是当前收到 MsgSelectUplink 的通道。
 				downlinkBytes := make([]byte, 4)
-				binary.BigEndian.PutUint32(downlinkBytes, uint32(chID))
+				binary.BigEndian.PutUint32(downlinkBytes, uint32(chosen))
 				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, common.EncodeMessage(common.MsgSelectDownlink, connID, downlinkBytes, nil))
 
 				// 如果是预绑定请求，通知 PairWarmer 完成 Pair 构建
 				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") {
-					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chID, nil)
+					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}
 
