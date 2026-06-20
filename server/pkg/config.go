@@ -55,8 +55,8 @@ func DefaultConfig() *Config {
 		WriteTimeout:         5 * time.Second,
 		PingInterval:         5 * time.Second,
 		HandshakeTimeout:     5 * time.Second,
-		ReadBufferSize:       64 * 1024,
-		WriteBufferSize:      64 * 1024,
+		ReadBufferSize:         64 * 1024,
+		WriteBufferSize:        64 * 1024,
 		BackpressureLimitBytes: 1024 * 1024, // 默认 1MB
 		MaxTotalChannels:     0,
 		MaxChannelsPerClient: 0,
