@@ -917,12 +917,35 @@ func (p *clientPool) Unregister(connID string) {
 }
 
 // selectDownlink 选择下行通道，返回是否首次选中以及已选中的通道号。
+// 如果连接关联了 HotChannelPair，则直接使用 Pair 中预绑定的下行通道，避免竞态。
 func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, chosen int, start time.Time, target string, uplink int, typ string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	st := p.conns[connID]
 	if st == nil || st.target == "" {
 		return
+	}
+
+	// Hot Pair 路径：使用预绑定阶段确定的下行通道
+	if st.pair != nil {
+		pairDownlink := st.pair.DownlinkChID
+		if pairDownlink > 0 {
+			if atomic.CompareAndSwapInt32(&st.downlink, 0, int32(pairDownlink)) {
+				chosen = pairDownlink
+				selected = true
+				start = st.start
+			} else {
+				chosen = int(atomic.LoadInt32(&st.downlink))
+				selected = false
+			}
+			target = st.target
+			uplink = st.pair.UplinkChID
+			if uplink <= 0 && st.uplink > 0 {
+				uplink = st.uplink
+			}
+			typ = st.reqType
+			return
+		}
 	}
 
 	chosen = int(atomic.LoadInt32(&st.downlink))
