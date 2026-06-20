@@ -167,6 +167,17 @@ func (w *PairWarmer) PairCountForTest() int {
 	return len(w.pairs)
 }
 
+// deletePrebindState 删除预绑定临时状态（不调用 Unregister，避免重复加锁和额外日志）
+func (w *PairWarmer) deletePrebindState(connID string) {
+	w.pool.mu.Lock()
+	st := w.pool.conns[connID]
+	if st != nil {
+		st.closed = true
+		delete(w.pool.conns, connID)
+	}
+	w.pool.mu.Unlock()
+}
+
 // BuildPair 使用可用通道列表构建一个 Hot Pair，同步等待预绑定结果
 func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	if w.ctx.Err() != nil {
@@ -177,6 +188,17 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	}
 
 	connID := "prebind-" + uuid.New().String()
+
+	// 在客户端连接池中注册临时状态，使 handleChannel 的 selectDownlink 能正常竞争下行通道。
+	w.pool.mu.Lock()
+	w.pool.conns[connID] = &clientConnState{
+		id:        connID,
+		target:    common.PrebindTarget,
+		start:     time.Now(),
+		connected: make(chan bool, 1),
+		closed:    false,
+	}
+	w.pool.mu.Unlock()
 
 	meta := make([]byte, 1+len(common.PrebindTarget))
 	meta[0] = byte(w.pool.config.IPStrategy)
@@ -195,6 +217,7 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 		}
 	}
 	if sent == 0 {
+		w.deletePrebindState(connID)
 		return nil, fmt.Errorf("无法发送预绑定请求到任何可用通道")
 	}
 
@@ -205,15 +228,19 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 	for {
 		select {
 		case <-w.ctx.Done():
+			w.deletePrebindState(connID)
 			return nil, fmt.Errorf("PairWarmer 已关闭")
 		case <-timer.C:
+			w.deletePrebindState(connID)
 			return nil, fmt.Errorf("预绑定超时")
 		case res := <-w.prebindResultCh:
 			if res.connID == connID {
 				if res.err != nil {
+					w.deletePrebindState(connID)
 					return nil, res.err
 				}
 				if w.ctx.Err() != nil {
+					w.deletePrebindState(connID)
 					return nil, fmt.Errorf("PairWarmer 已关闭")
 				}
 				pair := &HotChannelPair{
@@ -229,6 +256,8 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 					w.primary = pair
 				}
 				w.mu.Unlock()
+				// 预绑定成功，清理临时连接状态
+				w.deletePrebindState(connID)
 				return pair, nil
 			}
 			// 不匹配的 connID 忽略，继续等待
