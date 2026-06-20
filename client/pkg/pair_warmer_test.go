@@ -24,7 +24,7 @@ func TestPairWarmerNew(t *testing.T) {
 	}
 }
 
-func TestPairWarmerAcquireReleaseAndClose(t *testing.T) {
+func TestPairWarmerAcquireReleaseKeepsPairReady(t *testing.T) {
 	cfg := DefaultConfig()
 	p := newTestClientPool(cfg)
 	w := NewPairWarmer(p, cfg)
@@ -37,6 +37,10 @@ func TestPairWarmerAcquireReleaseAndClose(t *testing.T) {
 	pair.SetStateForTest(PairStateReady)
 
 	w.SetPrimaryForTest(pair)
+	// 手动加入 pairs 列表
+	w.mu.Lock()
+	w.pairs = append(w.pairs, pair)
+	w.mu.Unlock()
 
 	acquired := w.AcquirePrimary()
 	if acquired == nil {
@@ -48,12 +52,20 @@ func TestPairWarmerAcquireReleaseAndClose(t *testing.T) {
 
 	w.ReleasePair(acquired)
 
-	if pair.State() != PairStateClosed {
-		t.Fatalf("expected state Closed, got %d", pair.State())
+	// Pair 应该保持 Ready 供后续请求复用
+	if pair.State() != PairStateReady {
+		t.Fatalf("expected state Ready after release, got %d", pair.State())
 	}
-	if w.PairCountForTest() != 0 {
-		t.Fatalf("expected 0 pairs, got %d", w.PairCountForTest())
+	if w.PairCountForTest() != 1 {
+		t.Fatalf("expected 1 pair, got %d", w.PairCountForTest())
 	}
+
+	// 再次获取应仍然成功
+	acquired2 := w.AcquirePrimary()
+	if acquired2 == nil {
+		t.Fatal("expected to re-acquire released pair")
+	}
+	w.ReleasePair(acquired2)
 }
 
 func TestPairWarmerReleaseDrainingPair(t *testing.T) {
@@ -121,12 +133,12 @@ func TestPairWarmerInvalidateChannel(t *testing.T) {
 		t.Fatalf("expected 1 pair remaining, got %d", w.PairCountForTest())
 	}
 
-	// primary 被影响时应置 nil
+	// primary 失效后应自动选举 pair2 为新的 primary
 	w.mu.RLock()
 	prim := w.primary
 	w.mu.RUnlock()
-	if prim != nil {
-		t.Fatal("expected primary to be nil after invalidating pair1")
+	if prim != pair2 {
+		t.Fatal("expected primary to be pair2 after invalidating pair1")
 	}
 }
 
