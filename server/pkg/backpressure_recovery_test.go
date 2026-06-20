@@ -11,10 +11,11 @@ import (
 // TestBackpressureGradualRecovery 测试分级恢复机制
 func TestBackpressureGradualRecovery(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReadBufferSize = 100 // 100 bytes, 限制 = 800 bytes
+	cfg.ReadBufferSize = 100        // 100 bytes
+	cfg.BackpressureLimitBytes = 800 // 测试中显式设置限制为 800 bytes
 	pool := newServerPool("test-token", cfg)
 
-	limit := int64(cfg.ReadBufferSize) * 8 // 800 bytes
+	limit := int64(800)
 	if pool.globalQueueLimit != limit {
 		t.Fatalf("Expected limit %d, got %d", limit, pool.globalQueueLimit)
 	}
@@ -52,7 +53,8 @@ func TestBackpressureGradualRecovery(t *testing.T) {
 // TestBackpressureDirectRecovery 测试直接恢复（队列快速清空）
 func TestBackpressureDirectRecovery(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReadBufferSize = 100 // 100 bytes, 限制 = 800 bytes
+	cfg.ReadBufferSize = 100
+	cfg.BackpressureLimitBytes = 800
 	pool := newServerPool("test-token", cfg)
 
 	// 触发暂停
@@ -75,7 +77,8 @@ func TestBackpressureDirectRecovery(t *testing.T) {
 // TestBackpressureStuckAtMiddle 测试卡在中间水位的场景（修复前会失败的场景）
 func TestBackpressureStuckAtMiddle(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReadBufferSize = 100 // 100 bytes, 限制 = 800 bytes
+	cfg.ReadBufferSize = 100
+	cfg.BackpressureLimitBytes = 800
 	pool := newServerPool("test-token", cfg)
 
 	// 触发暂停
@@ -106,7 +109,8 @@ func TestBackpressureStuckAtMiddle(t *testing.T) {
 // TestBackpressureAllThresholds 测试所有阈值
 func TestBackpressureAllThresholds(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReadBufferSize = 100 // 限制 = 800 bytes
+	cfg.ReadBufferSize = 100
+	cfg.BackpressureLimitBytes = 800
 	pool := newServerPool("test-token", cfg)
 
 	tests := []struct {

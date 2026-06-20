@@ -40,6 +40,10 @@ type serverPool struct {
 
 // newServerPool 创建新的服务端连接池
 func newServerPool(token string, config *Config) *serverPool {
+	limit := int64(config.BackpressureLimitBytes)
+	if limit <= 0 {
+		limit = int64(config.ReadBufferSize) * 8
+	}
 	return &serverPool{
 		config:            config,
 		token:             token,
@@ -47,7 +51,7 @@ func newServerPool(token string, config *Config) *serverPool {
 		wsConns:           make([]*ServerWSConn, 0),
 		chConns:           make(map[int]*ServerWSConn),
 		nextChID:          1,
-		globalQueueLimit:  int64(config.ReadBufferSize) * 8,
+		globalQueueLimit:  limit,
 		backpressureState: int32(common.BackpressureNormal),
 	}
 }
