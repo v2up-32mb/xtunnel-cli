@@ -908,6 +908,13 @@ func (p *clientPool) Unregister(connID string) {
 	delete(p.conns, connID)
 	p.mu.Unlock()
 
+	// 预绑定临时状态不输出访问日志
+	if target == common.PrebindTarget {
+		delete(p.conns, connID)
+		p.mu.Unlock()
+		return
+	}
+
 	log.Printf("[客户端] %s %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		client, typ, target, u, d, common.ShortID(connID))
 
@@ -1137,7 +1144,8 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 					clientAddr = st.clientAddr
 				}
 				p.mu.RUnlock()
-				if chosen > 0 && target != "" {
+				// 预绑定目标不输出访问日志
+				if chosen > 0 && target != "" && target != common.PrebindTarget {
 					log.Printf("[客户端] %s 访问: %s, 通道: TX %d RX %d, ID:%s",
 						clientAddr, target, up, chosen, common.ShortID(connID))
 				}
