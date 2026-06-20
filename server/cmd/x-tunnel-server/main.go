@@ -47,16 +47,18 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&keyFile, "key", "", "TLS 私钥文件 (不指定则自动生成自签证书)")
 	fs.IntVar(&maxTotalChannels, "max-total-channels", 0, "服务端最大总通道数，0 表示无限制")
 	fs.IntVar(&maxChannelsPerClient, "max-client-channels", 0, "每个客户端最大通道数，0 表示无限制")
+	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 0, "全局队列背压阈值（字节），0 表示使用默认值 1MB")
 }
 
 var (
-	configFile           string
-	listenAddr           string
-	token                string
-	certFile             string
-	keyFile              string
-	maxTotalChannels     int
-	maxChannelsPerClient int
+	configFile              string
+	listenAddr              string
+	token                   string
+	certFile                string
+	keyFile                 string
+	maxTotalChannels        int
+	maxChannelsPerClient    int
+	backpressureLimitBytes  int
 )
 
 func parseFlags() *server.Config {
@@ -81,6 +83,7 @@ func parseFlags() *server.Config {
 	cfg.AutoCert = autoCert
 	cfg.MaxTotalChannels = maxTotalChannels
 	cfg.MaxChannelsPerClient = maxChannelsPerClient
+	cfg.BackpressureLimitBytes = backpressureLimitBytes
 
 	return cfg
 }
