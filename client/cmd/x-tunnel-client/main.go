@@ -88,6 +88,7 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&fastRetryAttempts, "fast-retry", 1, "快速重试次数")
 	fs.DurationVar(&fastRetryWindow, "fast-retry-window", 1*time.Second, "快速重试窗口")
 	fs.IntVar(&maxFastRetryConsecutive, "fast-retry-consecutive", 3, "连续进入快速重试的最大次数")
+	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 0, "全局队列背压阈值（字节），0 表示使用默认值 1MB")
 }
 
 var (
@@ -111,6 +112,7 @@ var (
 	fastRetryAttempts       int
 	fastRetryWindow         time.Duration
 	maxFastRetryConsecutive int
+	backpressureLimitBytes  int
 )
 
 func parseFlags() *client.Config {
@@ -189,6 +191,7 @@ func parseFlags() *client.Config {
 	cfg.FastRetryAttempts = fastRetryAttempts
 	cfg.FastRetryWindow = fastRetryWindow
 	cfg.MaxFastRetryConsecutive = maxFastRetryConsecutive
+	cfg.BackpressureLimitBytes = backpressureLimitBytes
 
 	// 生成并复用客户端 ID
 	cfg.ClientID = uuid.NewString()
