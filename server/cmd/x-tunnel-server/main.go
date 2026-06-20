@@ -47,7 +47,7 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&keyFile, "key", "", "TLS 私钥文件 (不指定则自动生成自签证书)")
 	fs.IntVar(&maxTotalChannels, "max-total-channels", 0, "服务端最大总通道数，0 表示无限制")
 	fs.IntVar(&maxChannelsPerClient, "max-client-channels", 0, "每个客户端最大通道数，0 表示无限制")
-	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 0, "全局队列背压阈值（字节），0 表示使用默认值 1MB")
+	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 1024*1024, "全局队列背压阈值（字节），默认 1MB")
 }
 
 var (
