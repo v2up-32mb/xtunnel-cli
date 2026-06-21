@@ -77,6 +77,9 @@ type clientPool struct {
 	// 通道就绪/失效通知（用于 PairWarmer）
 	chReadyCh   chan int
 	chInvalidCh chan int
+
+	// 通道就绪计数（用于延迟启动 PairWarmer）
+	readyChannels int32
 }
 
 // newClientPool 创建新的连接池
@@ -169,9 +172,9 @@ func (p *clientPool) Start(relayNodes []string) {
 				}
 			}
 
-			// 启动 PairWarmer（在 relay/dial 启动之后）
+			// 启动 PairWarmer 延迟监听器（在所有通道就绪后才启动）
 			if p.config.EnableHotPair && p.pairWarmer != nil {
-				go p.pairWarmer.Run()
+				go p.delayedStartPairWarmer(total)
 			}
 			return
 		}
@@ -186,9 +189,9 @@ func (p *clientPool) Start(relayNodes []string) {
 		go p.dialAndServe(i, "")
 	}
 
-	// 启动 PairWarmer（在 relay/dial 启动之后）
+	// 启动 PairWarmer 延迟监听器（在所有通道就绪后才启动）
 	if p.config.EnableHotPair && p.pairWarmer != nil {
-		go p.pairWarmer.Run()
+		go p.delayedStartPairWarmer(p.config.Connections)
 	}
 }
 
@@ -236,6 +239,40 @@ func (p *clientPool) Shutdown() {
 	wg.Wait()
 
 	log.Printf("[客户端] 所有连接已关闭")
+}
+
+// delayedStartPairWarmer 等待所有通道就绪后再启动 PairWarmer
+func (p *clientPool) delayedStartPairWarmer(expectedCount int) {
+	log.Printf("[PairWarmer] 等待 %d 个通道就绪后启动...", expectedCount)
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
+
+	checkTicker := time.NewTicker(500 * time.Millisecond)
+	defer checkTicker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			log.Printf("[PairWarmer] 启动取消（context 已关闭）")
+			return
+		case <-timeout.C:
+			ready := int(atomic.LoadInt32(&p.readyChannels))
+			if ready > 0 {
+				log.Printf("[PairWarmer] 启动超时，但已有 %d/%d 通道就绪，继续启动", ready, expectedCount)
+				p.pairWarmer.Run()
+			} else {
+				log.Printf("[PairWarmer] 启动超时且无就绪通道，放弃启动")
+			}
+			return
+		case <-checkTicker.C:
+			ready := int(atomic.LoadInt32(&p.readyChannels))
+			if ready >= expectedCount {
+				log.Printf("[PairWarmer] 全部 %d 个通道已就绪，启动 PairWarmer", ready)
+				p.pairWarmer.Run()
+				return
+			}
+		}
+	}
 }
 
 // chIndex 获取通道索引
@@ -405,6 +442,9 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.wsConns[idx] = wsConn
 		p.wsConnsMu.Unlock()
 
+		// 增加就绪通道计数
+		atomic.AddInt32(&p.readyChannels, 1)
+
 		// 非阻塞发送就绪通知
 		select {
 		case p.chReadyCh <- chID:
@@ -419,6 +459,9 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = nil
 		p.wsConnsMu.Unlock()
+
+		// 减少就绪通道计数
+		atomic.AddInt32(&p.readyChannels, -1)
 
 		// 非阻塞发送失效通知
 		select {
@@ -698,17 +741,21 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 	}
 }
 
-// broadcastWrite 广播写入所有通道
-func (p *clientPool) broadcastWrite(msgType int, data []byte) {
+// broadcastWrite 广播写入所有通道，返回成功写入的通道数
+func (p *clientPool) broadcastWrite(msgType int, data []byte) int {
 	p.wsConnsMu.RLock()
 	defer p.wsConnsMu.RUnlock()
 
+	successCount := 0
 	for i, c := range p.wsConns {
 		if c == nil {
 			continue
 		}
-		_ = p.asyncWriteDirect(i+1, msgType, data)
+		if err := p.asyncWriteDirect(i+1, msgType, data); err == nil {
+			successCount++
+		}
 	}
+	return successCount
 }
 
 // noteUplink 记录上行通道
@@ -797,7 +844,11 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	}
 
 	msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
-	p.broadcastWrite(websocket.BinaryMessage, msg)
+	sent := p.broadcastWrite(websocket.BinaryMessage, msg)
+	if sent == 0 {
+		log.Printf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, common.ShortID(connID))
+		p.Unregister(connID)
+	}
 }
 
 // RegisterUDP 注册 UDP 连接
@@ -843,7 +894,11 @@ func (p *clientPool) StartUDPRace(connID, target string) {
 	meta[0] = byte(p.config.IPStrategy)
 	copy(meta[1:], target)
 
-	p.broadcastWrite(websocket.BinaryMessage, common.EncodeMessage(common.MsgUDPConnect, connID, meta, nil))
+	sent := p.broadcastWrite(websocket.BinaryMessage, common.EncodeMessage(common.MsgUDPConnect, connID, meta, nil))
+	if sent == 0 {
+		log.Printf("[客户端] SOCKS5 UDP 广播连接请求失败，无可用通道，ID:%s", common.ShortID(connID))
+		p.Unregister(connID)
+	}
 }
 
 // Unregister 注销连接
@@ -1063,7 +1118,10 @@ func (p *clientPool) availableChannels() []int {
 	var available []int
 	for i, c := range p.wsConns {
 		if c != nil {
-			available = append(available, i+1)
+			// 验证写队列是否还存在
+			if i < len(p.writeQueues) && p.writeQueues[i] != nil {
+				available = append(available, i+1)
+			}
 		}
 	}
 	return available
