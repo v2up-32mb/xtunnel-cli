@@ -409,11 +409,42 @@ func (w *PairWarmer) tryRefresh() {
 		w.ensurePrimaryLocked()
 	}
 	w.mu.Unlock()
+
+	// 验证 primary 的通道是否真实可用
+	w.mu.RLock()
+	primary := w.primary
+	w.mu.RUnlock()
+
+	if primary != nil && primary.State() == PairStateReady {
+		available := w.pool.availableChannels()
+		uplinkValid := false
+		downlinkValid := false
+		for _, chID := range available {
+			if chID == primary.UplinkChID {
+				uplinkValid = true
+			}
+			if chID == primary.DownlinkChID {
+				downlinkValid = true
+			}
+		}
+		if !uplinkValid || !downlinkValid {
+			log.Printf("[PairWarmer] primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，标记为 Draining",
+				primary.ID, primary.UplinkChID, uplinkValid, primary.DownlinkChID, downlinkValid)
+			if !uplinkValid {
+				w.InvalidateChannel(primary.UplinkChID)
+			}
+			if !downlinkValid {
+				w.InvalidateChannel(primary.DownlinkChID)
+			}
+		}
+	}
+
 	w.tryBuildPairs()
 }
 
 // periodicRefresh 周期性刷新：评估当前 Pair 状态并尝试补充/轮换 Pair。
-// 当 Ready Pair 数量已满足时，会将最老的 Ready Pair 标记为 Draining 并重建，
+// 在单 Pair 模式下，通过发送探测请求验证通道质量；
+// 在多 Pair 模式下，会将最老的 Ready Pair 标记为 Draining 并重建，
 // 从而持续验证通道质量并避免 Pair 长期不变。
 func (w *PairWarmer) periodicRefresh() {
 	w.mu.RLock()
@@ -433,25 +464,58 @@ func (w *PairWarmer) periodicRefresh() {
 
 	if readyCount >= w.config.PairCount {
 		if readyCount <= 1 {
-			// 单 Pair 模式保守处理：不强制轮换，避免短暂无 Pair 可用
-			log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，单 Pair 模式不强制轮换", readyCount, w.config.PairCount, primaryID, stateList)
-			return
-		}
-		// 多 Pair 模式：把最老的 Ready Pair 标记为 Draining，触发重建
-		w.mu.Lock()
-		var oldest *HotChannelPair
-		for _, pair := range w.pairs {
-			if pair.State() == PairStateReady {
-				if oldest == nil || pair.createdAt.Before(oldest.createdAt) {
-					oldest = pair
+			// 单 Pair 模式：验证通道是否真实可用，而不是直接返回
+			log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，单 Pair 模式验证通道质量", readyCount, w.config.PairCount, primaryID, stateList)
+			w.mu.RLock()
+			primary := w.primary
+			w.mu.RUnlock()
+
+			if primary != nil && primary.State() == PairStateReady {
+				available := w.pool.availableChannels()
+				uplinkValid := false
+				downlinkValid := false
+				for _, chID := range available {
+					if chID == primary.UplinkChID {
+						uplinkValid = true
+					}
+					if chID == primary.DownlinkChID {
+						downlinkValid = true
+					}
+				}
+				if !uplinkValid || !downlinkValid {
+					log.Printf("[PairWarmer] 单 Pair 模式下 primary %s 的通道已失效 (上行:%d 有效:%v, 下行:%d 有效:%v)，触发重建",
+						primary.ID, primary.UplinkChID, uplinkValid, primary.DownlinkChID, downlinkValid)
+					if !uplinkValid {
+						w.InvalidateChannel(primary.UplinkChID)
+					}
+					if !downlinkValid {
+						w.InvalidateChannel(primary.DownlinkChID)
+					}
+					// 触发重建
+					w.tryBuildPairs()
+					return
+				}
+				// 通道有效，不需要额外操作
+				log.Printf("[PairWarmer] 单 Pair 模式下 primary %s 的通道验证通过，保持不变", primary.ID)
+				return
+			}
+		} else {
+			// 多 Pair 模式：把最老的 Ready Pair 标记为 Draining，触发重建
+			w.mu.Lock()
+			var oldest *HotChannelPair
+			for _, pair := range w.pairs {
+				if pair.State() == PairStateReady {
+					if oldest == nil || pair.createdAt.Before(oldest.createdAt) {
+						oldest = pair
+					}
 				}
 			}
+			if oldest != nil {
+				oldest.setState(PairStateDraining)
+				log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，将最老 Pair %s 标记为 Draining 以触发重建", readyCount, w.config.PairCount, primaryID, stateList, oldest.ID)
+			}
+			w.mu.Unlock()
 		}
-		if oldest != nil {
-			oldest.setState(PairStateDraining)
-			log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，将最老 Pair %s 标记为 Draining 以触发重建", readyCount, w.config.PairCount, primaryID, stateList, oldest.ID)
-		}
-		w.mu.Unlock()
 	} else {
 		log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d (不足), primary=%s, allPairs=%v，尝试补充", readyCount, w.config.PairCount, primaryID, stateList)
 	}

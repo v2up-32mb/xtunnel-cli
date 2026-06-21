@@ -26,6 +26,9 @@ const echConfigTTL = 1 * time.Hour
 // 定期刷新间隔（5分钟）
 const echRefreshInterval = 5 * time.Minute
 
+// ECH 获取最大重试次数
+const echMaxRetries = 10
+
 type ECHManager struct {
 	config               *Config
 	echList              []byte
@@ -40,6 +43,7 @@ type ECHManager struct {
 	queryDoHFn           func(domain, dohURL string) (string, error)
 	queryDNSUDPFn        func(domain, dnsServer string) (string, error)
 	fallbackDNSUDPServer string
+	fallbackToNonECH     bool // 标记是否已回退到非 ECH 模式
 }
 
 func NewECHManager(cfg *Config, parent context.Context) *ECHManager {
@@ -57,16 +61,27 @@ func NewECHManager(cfg *Config, parent context.Context) *ECHManager {
 }
 
 func (m *ECHManager) Prepare() error {
+	retryCount := 0
 	for {
 		select {
 		case <-m.ctx.Done():
 			return m.ctx.Err()
 		default:
 		}
-		log.Printf("[客户端] DNS查询 ECH: %s -> %s", m.config.DNSServer, m.config.ECHDomain)
+
+		if retryCount >= echMaxRetries {
+			log.Printf("[客户端] ECH 配置获取失败已达 %d 次，回退到非 ECH 模式", echMaxRetries)
+			m.echListMu.Lock()
+			m.fallbackToNonECH = true
+			m.echListMu.Unlock()
+			return nil
+		}
+
+		log.Printf("[客户端] DNS查询 ECH: %s -> %s (尝试 %d/%d)", m.config.DNSServer, m.config.ECHDomain, retryCount+1, echMaxRetries)
 		echBase64, err := m.queryHTTPSRecord(m.config.ECHDomain, m.config.DNSServer)
 		if err != nil {
-			log.Printf("[客户端] DNS 查询失败: %v,重试...", err)
+			retryCount++
+			log.Printf("[客户端] DNS 查询失败: %v，重试... (%d/%d)", err, retryCount, echMaxRetries)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-m.ctx.Done():
@@ -75,7 +90,8 @@ func (m *ECHManager) Prepare() error {
 			continue
 		}
 		if echBase64 == "" {
-			log.Printf("[客户端] 未找到 ECH 参数,重试...")
+			retryCount++
+			log.Printf("[客户端] 未找到 ECH 参数，重试... (%d/%d)", retryCount, echMaxRetries)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-m.ctx.Done():
@@ -85,7 +101,8 @@ func (m *ECHManager) Prepare() error {
 		}
 		raw, err := base64.StdEncoding.DecodeString(echBase64)
 		if err != nil {
-			log.Printf("[客户端] ECH Base64 解码失败: %v,重试...", err)
+			retryCount++
+			log.Printf("[客户端] ECH Base64 解码失败: %v，重试... (%d/%d)", err, retryCount, echMaxRetries)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-m.ctx.Done():
@@ -96,6 +113,7 @@ func (m *ECHManager) Prepare() error {
 		m.echListMu.Lock()
 		m.echList = raw
 		m.lastRefresh = time.Now()
+		m.fallbackToNonECH = false
 		m.echListMu.Unlock()
 		log.Printf("[客户端] ECHConfigList 长度: %d 字节", len(raw))
 		return nil
@@ -180,9 +198,24 @@ func (m *ECHManager) BuildTLSConfig(serverName string) (*tls.Config, error) {
 		return m.buildStandardTLSConfig(serverName)
 	}
 
+	// 检查是否已回退到非 ECH 模式
+	m.echListMu.RLock()
+	fallback := m.fallbackToNonECH
+	m.echListMu.RUnlock()
+
+	if fallback {
+		log.Printf("[客户端] 使用非 ECH 模式连接（已回退）")
+		return m.buildStandardTLSConfig(serverName)
+	}
+
 	ech, e := m.GetList()
 	if e != nil {
-		return nil, e
+		// ECH 获取失败，回退到非 ECH 模式
+		log.Printf("[客户端] ECH 配置不可用: %v，回退到非 ECH 模式", e)
+		m.echListMu.Lock()
+		m.fallbackToNonECH = true
+		m.echListMu.Unlock()
+		return m.buildStandardTLSConfig(serverName)
 	}
 	cfgTLS, err := m.buildTLSConfigWithECH(serverName, ech)
 	if err != nil {
