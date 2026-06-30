@@ -3,6 +3,7 @@ package client
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -201,7 +202,9 @@ func validateHTTPProxyAuth(req *http.Request, cfgp *ProxyConfig) bool {
 	if err != nil {
 		return false
 	}
-	return string(decoded) == cfgp.Username+":"+cfgp.Password
+	// 使用常量时间比较避免 timing attack；凭证含多个 ':' 时按整体 user:pass 比对
+	expected := []byte(cfgp.Username + ":" + cfgp.Password)
+	return subtle.ConstantTimeCompare(decoded, expected) == 1
 }
 
 func writeHTTPProxyResponse(c net.Conn, status int, text string, headers map[string]string) {

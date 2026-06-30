@@ -52,6 +52,7 @@ type ServerWSConn struct {
 	writeChan  chan writeTask
 	queueFullCount int
 	lastQueueFull  time.Time
+	lastReset      time.Time // 上次触发 MsgChannelReset 的时间，用于冷却
 }
 
 // start 启动写入协程
@@ -73,8 +74,8 @@ func (wsConn *ServerWSConn) readLoop() {
 	wsConn.ws.SetReadDeadline(time.Now().Add(wsConn.pool.config.ReadTimeout))
 	wsConn.ws.SetPingHandler(func(m string) error {
 		wsConn.ws.SetReadDeadline(time.Now().Add(wsConn.pool.config.ReadTimeout))
-		_ = wsConn.asyncWrite(websocket.PongMessage, []byte(m))
-		// pong 发送失败不影响 ping/pong 循环,总是返回 nil
+		// Pong 用 WriteControl 直接发送，并发安全且不走写队列，避免队列满触发 MsgChannelReset
+		_ = wsConn.ws.WriteControl(websocket.PongMessage, []byte(m), time.Now().Add(wsConn.pool.config.WriteTimeout))
 		return nil
 	})
 
@@ -180,9 +181,12 @@ default:
 		}
 		wsConn.lastQueueFull = now
 		wsConn.queueFullCount++
-		shouldReset := wsConn.queueFullCount >= 3
+		// 提高阈值并加冷却：1 秒内连续 5 次队列满且距上次重置超过 5 秒才重置，
+		// 避免正常突发流量误触发通道重建。
+		shouldReset := wsConn.queueFullCount >= 5 && (wsConn.lastReset.IsZero() || now.Sub(wsConn.lastReset) > 5*time.Second)
 		if shouldReset {
 			wsConn.queueFullCount = 0
+			wsConn.lastReset = now
 		}
 		wsConn.mu.Unlock()
 

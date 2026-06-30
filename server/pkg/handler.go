@@ -79,6 +79,8 @@ func (p *serverPool) connectTarget(st *ServerConnState) {
 	if err != nil {
 		log.Printf("[服务端] 连接目标失败 %s: %v", st.target, err)
 		p.sendDownlink(st.connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
+		// 补发 MsgTCPClose 通知客户端清理，避免半开连接
+		p.sendDownlink(st.connID, common.MsgTCPClose, nil, nil)
 		p.mu.Lock()
 		delete(p.conns, st.connID)
 		p.mu.Unlock()
@@ -270,6 +272,10 @@ func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) 
 
 // forwardTargetToClient 转发目标→客户端数据
 func (p *serverPool) forwardTargetToClient(st *ServerConnState) {
+	// 主动关闭时通知客户端发 MsgTCPClose，避免半开连接。
+	// 利用 defer LIFO：先于 unregisterConn 执行，此时 st 仍在 p.conns 中可发送。
+	// 若连接是因客户端先发 MsgTCPClose 而关闭，unregisterConn 已删除 st，此处 sendDownlink 会安全返回错误，不产生回声。
+	defer p.sendDownlink(st.connID, common.MsgTCPClose, nil, nil)
 	defer p.unregisterConn(st.connID)
 
 	buf := make([]byte, 32*1024)

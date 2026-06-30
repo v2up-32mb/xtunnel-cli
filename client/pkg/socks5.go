@@ -394,15 +394,10 @@ func (p *clientPool) handleSOCKS5UDP(c net.Conn, cfgp *ProxyConfig) {
 
 	go assoc.loop()
 
-	// keep TCP alive until closed
-	b := make([]byte, 1)
-	for {
-		if _, err := c.Read(b); err != nil {
-			assoc.notifyDone()
-			assoc.Close()
-			return
-		}
-	}
+	// keep TCP alive until closed: 丢弃控制连接上的任何数据，直到对端关闭
+	io.Copy(io.Discard, c)
+	assoc.notifyDone()
+	assoc.Close()
 }
 
 // loop UDP 接收循环

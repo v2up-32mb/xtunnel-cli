@@ -14,6 +14,10 @@ import (
 	"x-tunnel/common"
 )
 
+// maxAllowedChID 客户端可指定的通道 ID 上限。
+// 防止恶意客户端传入巨大 ch_id 导致 wsConns 切片无限扩容（OOM）。
+const maxAllowedChID = 65535
+
 // serverPool 服务端连接池
 type serverPool struct {
 	config        *Config
@@ -93,7 +97,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var chID int
 	if chIDStr := queryParams.Get("ch_id"); chIDStr != "" {
 		_, err := fmt.Sscanf(chIDStr, "%d", &chID)
-		if err != nil || chID <= 0 {
+		if err != nil || chID <= 0 || chID > maxAllowedChID {
 			log.Printf("[服务端] 无效的 ch_id 参数: %s", chIDStr)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -149,6 +153,15 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 扩展切片
 	for chID > len(p.wsConns) {
 		p.wsConns = append(p.wsConns, nil)
+	}
+	// 检查 ch_id 是否已被活跃连接占用，防止通道劫持。
+	// 仅当旧连接已断开（closed）时才允许新连接接管，兼容正常断线重连。
+	if existing := p.chConns[chID]; existing != nil && !existing.closed {
+		p.mu.Unlock()
+		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "channel id in use"), time.Now().Add(p.config.WriteTimeout))
+		_ = ws.Close()
+		log.Printf("[服务端] 拒绝客户端 %s: ch_id %d 已被占用", clientID, chID)
+		return
 	}
 	if chID == len(p.wsConns) {
 		p.wsConns = append(p.wsConns, wsConn)
@@ -411,6 +424,22 @@ func (p *serverPool) unregisterConn(connID string) {
 
 	log.Printf("[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		clientAddr, target, u, d, common.ShortID(connID))
+}
+
+// Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。
+// 用于服务端优雅关闭时让客户端及时感知断开，避免半开连接。
+func (p *serverPool) Shutdown() {
+	p.mu.RLock()
+	conns := make([]*ServerWSConn, 0, len(p.wsConns))
+	for _, wsConn := range p.wsConns {
+		if wsConn != nil {
+			conns = append(conns, wsConn)
+		}
+	}
+	p.mu.RUnlock()
+	for _, wsConn := range conns {
+		wsConn.close()
+	}
 }
 
 // Stats 返回统计信息

@@ -20,8 +20,8 @@ func TestAsyncWriteQueueFullSendsChannelReset(t *testing.T) {
 	defer cleanup()
 	wsConn.ws = conn
 
-	// 连续触发 3 次队列满
-	for i := 0; i < 3; i++ {
+	// 连续触发 5 次队列满（阈值已提高至 5）
+	for i := 0; i < 5; i++ {
 		_ = wsConn.asyncWrite(websocket.BinaryMessage, make([]byte, 10))
 	}
 

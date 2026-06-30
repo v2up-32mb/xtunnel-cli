@@ -69,9 +69,12 @@ func parseFlags() *server.Config {
 		log.Fatalf("[服务端] 错误: 必须指定 -token 参数")
 	}
 
-	// 确定是否使用自签证书
+	// 确定是否使用自签证书；cert 与 key 必须成对提供，否则报错
 	autoCert := true
-	if certFile != "" && keyFile != "" {
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			log.Fatalf("[服务端] 错误: -cert 与 -key 必须同时提供")
+		}
 		autoCert = false
 	}
 
