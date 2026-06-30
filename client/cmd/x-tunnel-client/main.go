@@ -27,13 +27,13 @@ func main() {
 		log.Fatalf("[客户端] 创建客户端失败: %v", err)
 	}
 
+	// 先解析并校验本地监听地址，避免连接池已启动后才发现地址非法
+	listenAddrs := parseListenAddrs()
+
 	if err := c.Start(); err != nil {
 		log.Fatalf("[客户端] 启动客户端失败: %v", err)
 	}
 	defer c.Shutdown()
-
-	// 解析监听地址
-	listenAddrs := parseListenAddrs()
 
 	// 启动本地代理监听器
 	for _, addr := range listenAddrs {
@@ -49,7 +49,8 @@ func main() {
 				err = fmt.Errorf("不支持的监听协议")
 			}
 			if err != nil {
-				log.Printf("[客户端] 监听器错误 (%s): %v", a, err)
+				// 监听失败（端口占用/协议错误）为致命错误，直接退出
+				log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
 			}
 		}()
 	}

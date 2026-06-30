@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -77,17 +78,22 @@ func (s *Server) Start() error {
 
 	// 创建 HTTP 服务器
 	s.httpSrv = &http.Server{
-		Addr:              s.config.ListenAddr,
 		Handler:           http.HandlerFunc(s.pool.handleWebSocket),
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: s.config.HandshakeTimeout,
+	}
+
+	// 预先占用端口，使端口冲突在 Start 阶段立即暴露而非异步失败
+	ln, err := net.Listen("tcp", s.config.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("监听 %s 失败: %w", s.config.ListenAddr, err)
 	}
 
 	// 启动服务器（在 goroutine 中）
 	go func() {
 		log.Printf("[服务端] HTTPS 监听: %s", s.config.ListenAddr)
 		log.Printf("[服务端] Token: %s", s.config.Token)
-		if err := s.httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		if err := s.httpSrv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
 			log.Printf("[服务端] 启动失败: %v", err)
 		}
 	}()
@@ -111,6 +117,9 @@ func (s *Server) Shutdown() error {
 		defer cancel()
 		_ = s.httpSrv.Shutdown(ctx)
 	}
+
+	// 主动关闭所有已建立的 WebSocket 通道，让客户端及时感知断开
+	s.pool.Shutdown()
 
 	s.started = false
 	log.Printf("[服务端] 已关闭")
