@@ -83,25 +83,34 @@ func NewPairWarmer(pool *clientPool, cfg *Config) *PairWarmer {
 
 // AcquirePrimary 获取一个 Ready 状态的 Pair 并增加引用计数。
 // 优先返回当前 primary；若 primary 不可用，则扫描 pairs 列表。
+// 引用计数自增在读锁内完成，确保 InvalidateChannel（需要写锁）无法在自增与状态检查之间移除 Pair。
 func (w *PairWarmer) AcquirePrimary() *HotChannelPair {
 	w.mu.RLock()
-	candidates := make([]*HotChannelPair, 0, len(w.pairs))
-	if w.primary != nil && w.primary.State() == PairStateReady {
-		candidates = append(candidates, w.primary)
-	}
-	for _, pair := range w.pairs {
-		if pair != w.primary && pair.State() == PairStateReady {
-			candidates = append(candidates, pair)
-		}
-	}
-	w.mu.RUnlock()
+	defer w.mu.RUnlock()
 
-	for _, pair := range candidates {
+	tryAcquire := func(pair *HotChannelPair) bool {
+		if pair == nil || pair.State() != PairStateReady {
+			return false
+		}
 		atomic.AddInt32(&pair.refs, 1)
+		// 二次检查：自增后状态可能已被置为 Draining/Closed，此时放弃
 		if pair.State() == PairStateReady {
-			return pair
+			return true
 		}
 		atomic.AddInt32(&pair.refs, -1)
+		return false
+	}
+
+	if tryAcquire(w.primary) {
+		return w.primary
+	}
+	for _, pair := range w.pairs {
+		if pair == w.primary {
+			continue
+		}
+		if tryAcquire(pair) {
+			return pair
+		}
 	}
 	return nil
 }

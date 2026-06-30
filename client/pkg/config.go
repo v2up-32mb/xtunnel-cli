@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"x-tunnel/common"
@@ -50,6 +51,7 @@ type Config struct {
 
 	// 背压控制
 	BackpressureLimitBytes int // 全局队列背压阈值（字节），0 表示使用默认值 1MB
+	WriteQueueWaitTimeout  time.Duration // 写队列满时的等待超时，0 表示使用默认值 100ms
 
 	// SOCKS5 连接限制
 	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
@@ -80,6 +82,7 @@ func DefaultConfig() *Config {
 		ReadBufferSize:       64 * 1024,
 		WriteBufferSize:      64 * 1024,
 		BackpressureLimitBytes: 1024 * 1024, // 默认 1MB
+		WriteQueueWaitTimeout:  100 * time.Millisecond,
 		UDPBlockedPorts:      []int{443},
 		MaxSOCKS5Connections:    1024, // 默认最大 1024 个并发连接
 		EnableHotPair:           false,
@@ -95,6 +98,9 @@ func DefaultConfig() *Config {
 func (c *Config) Validate() error {
 	if c.ServerAddr == "" {
 		return ErrInvalidServerAddr
+	}
+	if !strings.HasPrefix(c.ServerAddr, "wss://") && !strings.HasPrefix(c.ServerAddr, "ws://") {
+		return errors.New("server address must start with wss:// or ws://")
 	}
 
 	if c.Connections <= 0 {

@@ -74,5 +74,8 @@ func (c *Config) Validate() error {
 	if c.MaxTotalChannels < 0 || c.MaxChannelsPerClient < 0 {
 		return errors.New("channel limits cannot be negative")
 	}
+	if c.ReadTimeout <= 0 || c.WriteTimeout <= 0 || c.PingInterval <= 0 || c.HandshakeTimeout <= 0 {
+		return errors.New("timeout values must be positive")
+	}
 	return nil
 }
