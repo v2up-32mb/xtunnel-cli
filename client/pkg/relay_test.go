@@ -84,3 +84,53 @@ func TestSelectNodeExcludingRefreshesHostnameNodesAndReturnsNewIP(t *testing.T) 
 		t.Fatalf("expected refreshed node list to include new IP, got %d nodes", len(m.nodes))
 	}
 }
+
+func TestSelectNodeExcludingLoadBalancesAcrossCandidates(t *testing.T) {
+	m := NewRelayNodeManager()
+	m.nodes = []*RelayNode{
+		{ID: "a", Address: "a", IP: "node-a", Score: 1.0, SuccessRate: 1.0},
+		{ID: "b", Address: "b", IP: "node-b", Score: 0.99, SuccessRate: 1.0},
+		{ID: "c", Address: "c", IP: "node-c", Score: 0.99, SuccessRate: 1.0},
+	}
+	// 模拟 node-a 已承载大量连接（负载因子降到底），其余节点空闲
+	for i := 0; i < maxLoadPerNode*2; i++ {
+		m.Acquire("node-a")
+	}
+	// 多次选择应几乎不会命中高负载的 node-a
+	counts := map[string]int{}
+	for i := 0; i < 300; i++ {
+		n := m.SelectNodeExcluding(nil)
+		if n == nil {
+			t.Fatalf("SelectNodeExcluding() = nil")
+		}
+		counts[n.ip]++
+	}
+	if counts["node-a"] > 20 {
+		t.Fatalf("node-a selected %d/300 times, want load-balanced distribution", counts["node-a"])
+	}
+	if counts["node-b"] == 0 || counts["node-c"] == 0 {
+		t.Fatalf("expected node-b/node-c to be selected, got %v", counts)
+	}
+}
+
+func TestRelayAcquireRelease(t *testing.T) {
+	m := NewRelayNodeManager()
+	m.Acquire("1.1.1.1:443")
+	m.Acquire("1.1.1.1:443")
+	if got := m.AcquiredCount("1.1.1.1:443"); got != 2 {
+		t.Fatalf("AcquiredCount = %d, want 2", got)
+	}
+	m.Release("1.1.1.1:443")
+	if got := m.AcquiredCount("1.1.1.1:443"); got != 1 {
+		t.Fatalf("AcquiredCount after release = %d, want 1", got)
+	}
+	m.Release("1.1.1.1:443")
+	if got := m.AcquiredCount("1.1.1.1:443"); got != 0 {
+		t.Fatalf("AcquiredCount after final release = %d, want 0", got)
+	}
+	// 重复释放不应出现负数
+	m.Release("1.1.1.1:443")
+	if got := m.AcquiredCount("1.1.1.1:443"); got != 0 {
+		t.Fatalf("AcquiredCount after over-release = %d, want 0", got)
+	}
+}
