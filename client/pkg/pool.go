@@ -473,9 +473,10 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		currentDelay = dialAndServeBaseDelay
 		frs.OnSuccess()
 
-		// 标记节点成功
+		// 标记节点成功并计入负载（重连时按负载分散，避免扎堆同一节点）
 		if ip != "" && p.relayCount > 0 {
 			p.relayManager.MarkNodeSuccess(ip)
+			p.relayManager.Acquire(ip)
 		}
 
 		if ip != "" {
@@ -525,6 +526,11 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		}
 
 		p.cleanupChannel(chID)
+
+		// 释放节点负载占用
+		if ip != "" && p.relayCount > 0 {
+			p.relayManager.Release(ip)
+		}
 
 		log.Printf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
 		select {
