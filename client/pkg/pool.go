@@ -120,7 +120,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 	}
 
 	for i := 0; i < cfg.Connections; i++ {
-		p.writeQueues[i] = make(chan writeJob, 4096)
+		p.writeQueues[i] = make(chan writeJob, writeQueueSize)
 	}
 
 	return p, nil
@@ -163,7 +163,7 @@ func (p *clientPool) Start(relayNodes []string) {
 			// 重新分配写队列
 			newQueues := make([]chan writeJob, total)
 			for i := 0; i < total; i++ {
-				newQueues[i] = make(chan writeJob, 4096)
+				newQueues[i] = make(chan writeJob, writeQueueSize)
 			}
 			p.writeQueues = newQueues
 			p.connsWriteMutex = make([]sync.Mutex, total)
@@ -317,6 +317,9 @@ var (
 	dialAndServeMaxRetries = 20
 	dialAndServeBaseDelay  = 3 * time.Second
 	dialAndServeMaxDelay   = 60 * time.Second
+
+	// writeQueueSize 单通道写队列容量（会话级队列）
+	writeQueueSize = 4096
 )
 
 // fastRetryState 记录快速重连状态
@@ -467,12 +470,17 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			lastIP = ip
 		}
 		log.Printf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
+		// 会话级写队列：每次连接使用独立队列，旧连接遗留的 writeWorker
+		// 只能消费旧队列（其连接已关闭，很快自行退出），不会与新连接的
+		// writeWorker 抢数据包（修复断线重连后请求被旧 worker 吞掉的问题）。
+		queue := make(chan writeJob, writeQueueSize)
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = wsConn
+		p.writeQueues[idx] = queue
 		p.wsConnsMu.Unlock()
 
 		// 先启动写工作者，确保 availableChannels 返回该通道时已有消费者就绪
-		go p.writeWorker(idx, wsConn, p.writeQueues[idx])
+		go p.writeWorker(idx, wsConn, queue)
 
 		// 增加就绪通道计数
 		atomic.AddInt32(&p.readyChannels, 1)
