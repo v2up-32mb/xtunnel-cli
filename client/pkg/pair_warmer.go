@@ -55,9 +55,6 @@ type PairWarmer struct {
 	cancel  context.CancelFunc
 
 	prebindResultCh chan prebindResult
-
-	// pairIDCounter 用于生成展示用的两位十六进制 Pair ID（预绑定内部 connID 仍用 UUID）
-	pairIDCounter uint32
 }
 
 // prebindResult 预绑定结果
@@ -307,7 +304,6 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 					return nil, fmt.Errorf("PairWarmer 已关闭")
 				}
 				pair := &HotChannelPair{
-					ID:           w.generatePairID(),
 					UplinkChID:   res.uplinkChID,
 					DownlinkChID: res.downlinkChID,
 					state:        int32(PairStateReady),
@@ -323,11 +319,13 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 				// 预绑定成功，清理临时连接状态
 				w.deletePrebindState(connID)
 				if wasPrimary == nil {
-					log.Printf("[PairWarmer] 首次构建 Pair %s (上行: %d, 下行: %d)，设为 primary", pair.ID, pair.UplinkChID, pair.DownlinkChID)
-				} else if wasPrimary.ID != pair.ID {
-					log.Printf("[PairWarmer] 构建新 Pair %s (上行: %d, 下行: %d)，当前 primary=%s", pair.ID, pair.UplinkChID, pair.DownlinkChID, wasPrimary.ID)
+					log.Printf("[PairWarmer] 首次构建 Pair (上行: %d, 下行: %d)，设为 primary（ID 待分配）", pair.UplinkChID, pair.DownlinkChID)
 				} else {
-					log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)，primary 不变", pair.ID, pair.UplinkChID, pair.DownlinkChID)
+					primaryLabel := wasPrimary.ID
+					if primaryLabel == "" {
+						primaryLabel = "未分配"
+					}
+					log.Printf("[PairWarmer] 构建候选 Pair (上行: %d, 下行: %d)，当前 primary=%s", pair.UplinkChID, pair.DownlinkChID, primaryLabel)
 				}
 				return pair, nil
 			}
@@ -358,25 +356,26 @@ func pairChannelsEqual(a, b *HotChannelPair) bool {
 	return a.UplinkChID == b.UplinkChID && a.DownlinkChID == b.DownlinkChID
 }
 
-// generatePairID 生成两位十六进制的 Pair ID（用于日志展示），保证与当前存在的 Pair 不重复
-func (w *PairWarmer) generatePairID() string {
-	for i := 0; i < 256; i++ {
-		n := atomic.AddUint32(&w.pairIDCounter, 1) & 0xff
-		id := fmt.Sprintf("%02x", n)
-		used := false
-		w.mu.RLock()
-		for _, pair := range w.pairs {
-			if pair.ID == id {
-				used = true
-				break
-			}
-		}
-		w.mu.RUnlock()
-		if !used {
-			return id
+// assignPairSlot 为新建 Pair 分配 1..8 中未占用的最小槽位 ID（两位十进制）。
+// 同一组 hot-pair 的 ID 稳定复用（如 01、02），不随构建次数递增；
+// 替换场景由调用方直接继承旧 Pair 的 ID。
+func (w *PairWarmer) assignPairSlot(pair *HotChannelPair) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	used := make(map[string]bool, len(w.pairs))
+	for _, p := range w.pairs {
+		if p != pair && p.ID != "" {
+			used[p.ID] = true
 		}
 	}
-	return "ff" // 理论不可达：Pair 上限 8
+	for i := 1; i <= 8; i++ {
+		id := fmt.Sprintf("%02d", i)
+		if !used[id] {
+			pair.ID = id
+			return
+		}
+	}
+	pair.ID = "ff" // 理论不可达：Pair 上限 8
 }
 
 // discardCandidatePair 移除重建时通道与旧 Pair 一致的冗余候选，保留旧 Pair 继续服务。
@@ -517,6 +516,7 @@ func (w *PairWarmer) tryBuildPairs() {
 			log.Printf("[PairWarmer] 构建 Pair 失败: %v", err)
 			return
 		}
+		w.assignPairSlot(pair)
 		log.Printf("[PairWarmer] 成功构建 Pair %s (上行: %d, 下行: %d)", pair.ID, pair.UplinkChID, pair.DownlinkChID)
 		readyCount++
 	}
@@ -663,10 +663,15 @@ func (w *PairWarmer) periodicRefresh() {
 			}
 			if pairChannelsEqual(candidate, oldest) {
 				w.discardCandidatePair(candidate)
-				log.Printf("[PairWarmer] 周期性刷新触发: 候选 Pair %s 与最旧 Pair %s 通道完全一致 (上行:%d, 下行:%d)，跳过重建，旧 Pair 继续服务",
-					candidate.ID, oldest.ID, oldest.UplinkChID, oldest.DownlinkChID)
+				log.Printf("[PairWarmer] 周期性刷新触发: 候选与最旧 Pair %s 通道完全一致 (上行:%d, 下行:%d)，跳过重建，旧 Pair 继续服务",
+					oldest.ID, oldest.UplinkChID, oldest.DownlinkChID)
 				return
 			}
+			// 通道不同：候选继承旧 Pair 的槽位 ID（底层 prebind connID 仍为 UUID），
+			// 旧 Pair 正常进入 Draining，不影响其 drain 状态
+			candidate.ID = oldest.ID
+			log.Printf("[PairWarmer] 周期性刷新触发: 新 Pair %s (上行: %d, 下行: %d) 顶替旧 Pair，旧 Pair 进入 Draining",
+				candidate.ID, candidate.UplinkChID, candidate.DownlinkChID)
 			if oldest.State() == PairStateReady {
 				log.Printf("[PairWarmer] 周期性刷新触发: Ready=%d/%d, primary=%s, allPairs=%v，将最老 Pair %s 标记为 Draining 以触发替换", readyCount, w.config.PairCount, primaryID, stateList, oldest.ID)
 				// refs==0 时立即移除，避免积累无引用的 Draining Pair
