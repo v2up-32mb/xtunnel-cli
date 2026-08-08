@@ -42,7 +42,6 @@ func IsNormalCloseError(err error) bool {
 		ContainsString(errStr, "use of closed network connection") ||
 		ContainsString(errStr, "connection reset by peer") ||
 		ContainsString(errStr, "broken pipe") ||
-		ContainsString(errStr, "connection refused") ||
 		ContainsString(errStr, "websocket: close sent")
 }
 

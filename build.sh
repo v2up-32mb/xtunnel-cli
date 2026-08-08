@@ -98,7 +98,7 @@ echo ""
 
 # 编译函数
 build_binary() {
-    local target=$1      # client 或 server
+    local target=$1      # client
     local os=$2          # GOOS
     local arch=$3        # GOARCH
     local variant=$4     # armv7 (可选)
@@ -124,13 +124,8 @@ build_binary() {
     # 输出文件名
     local output="bin/xtunnel-${target}-${os}-${arch_name}${ext}"
 
-    # 源路径
-    local source_path=""
-    if [ "$target" = "client" ]; then
-        source_path="./client/cmd/x-tunnel-client"
-    else
-        source_path="./server/cmd/x-tunnel-server"
-    fi
+    # 源路径（本分支仅保留客户端）
+    local source_path="./client/cmd/x-tunnel-client"
 
     # 构建编译命令
     local build_cmd="go build -trimpath -ldflags=\"-s -w\" -o ${output} ${source_path}"
@@ -169,9 +164,6 @@ for platform in "${platforms[@]}"; do
 
     ((total_builds++))
     build_binary "client" "$os" "$arch" "$arch_variant"
-
-    ((total_builds++))
-    build_binary "server" "$os" "$arch" "$arch_variant"
 done
 
 # 计算耗时

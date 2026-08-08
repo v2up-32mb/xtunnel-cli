@@ -44,7 +44,7 @@ echo   -h, --help     显示此帮助信息
 echo   -v, --verbose  显示详细的编译命令
 echo   -c, --clean    清理 bin 目录后重新编译
 echo.
-echo 此脚本将编译以下平台的 client 和 server:
+echo 此脚本将编译以下平台的 client:
 echo   - linux/amd64
 echo   - linux/arm64
 echo   - linux/armv7
@@ -82,7 +82,7 @@ if "%CLEAN%"=="true" (
 )
 
 REM 统计变量
-set /a TOTAL_BUILDS=10
+set /a TOTAL_BUILDS=5
 set /a SUCCESS_COUNT=0
 set /a FAILED_COUNT=0
 
@@ -96,7 +96,7 @@ echo.
 
 REM 遍历平台
 for %%P in (%PLATFORMS%) do (
-    for %%T in (client server) do (
+    for %%T in (client) do (
         call :build_binary %%T %%P
     )
 )
@@ -151,13 +151,8 @@ if "%OS%"=="windows" set EXT=.exe
 REM 输出文件名
 set OUTPUT=bin\xtunnel-%TARGET%-%OS%-%ARCH_NAME%%EXT%
 
-REM 源文件列表
-set SOURCES=
-if "%TARGET%"=="client" (
-    set SOURCES=.\client\cmd\x-tunnel-client
-) else (
-    set SOURCES=.\server\cmd\x-tunnel-server
-)
+REM 源文件列表（本分支仅保留客户端）
+set SOURCES=.\client\cmd\x-tunnel-client
 
 REM 显示编译信息
 <nul set /p "=编译: %TARGET% %OS%/%ARCH_NAME%... "

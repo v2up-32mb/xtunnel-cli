@@ -3,6 +3,7 @@ package client
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -40,16 +41,8 @@ func (p *clientPool) acceptProxyLoop(l net.Listener, cfgp *ProxyConfig, handler 
 			continue
 		}
 		if p.socks5Sem != nil {
-			select {
-			case p.socks5Sem <- struct{}{}:
-				go func(conn net.Conn) {
-					defer func() { <-p.socks5Sem }()
-					handler(conn, cfgp)
-				}(c)
-			default:
-				log.Printf("[客户端] 本地代理连接数已达上限,拒绝新 HTTP 连接")
-				_ = c.Close()
-			}
+			// 与 SOCKS5 相同的并发语义：限制并发连接数，拒绝前预留突发等待窗口
+			p.acquireProxySlot(c, "HTTP 代理", cfgp, handler)
 		} else {
 			go handler(c, cfgp)
 		}
@@ -201,7 +194,9 @@ func validateHTTPProxyAuth(req *http.Request, cfgp *ProxyConfig) bool {
 	if err != nil {
 		return false
 	}
-	return string(decoded) == cfgp.Username+":"+cfgp.Password
+	// 使用常量时间比较避免 timing attack；凭证含多个 ':' 时按整体 user:pass 比对
+	expected := []byte(cfgp.Username + ":" + cfgp.Password)
+	return subtle.ConstantTimeCompare(decoded, expected) == 1
 }
 
 func writeHTTPProxyResponse(c net.Conn, status int, text string, headers map[string]string) {
