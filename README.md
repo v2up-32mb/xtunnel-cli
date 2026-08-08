@@ -3,6 +3,16 @@
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+> ## 🪟 本分支目标（win7-compat）
+>
+> 本分支专为 **Windows 7 系统**客户端构建维护，**仅保留客户端代码**：
+> - 使用 **Go 1.20** 构建（Go 1.21+ 已不再支持 Windows 7，故本分支锁固 Go 1.20）
+> - **剔除 ECH（Encrypted Client Hello）特性**（依赖较新的 TLS/ECH 运行时支持，Win7 + Go 1.20 不具备）
+> - **不包含服务端代码**（`server/` 目录已移除；服务端请使用 `main` 分支构建）
+> - 本分支客户端可正常连接 `main` 分支构建的服务端
+>
+> 仅做 Win7 客户端兼容性维护；新功能与 ECH 相关增强在 `main` 分支开发。
+
 **x-tunnel** 是一个基于 WebSocket 的高性能隧道代理系统,支持多通道连接池、SOCKS5 代理等功能.
 
 ## ✨ 特性

@@ -80,13 +80,17 @@ type clientPool struct {
 
 	// 通道就绪计数（用于延迟启动 PairWarmer）
 	readyChannels int32
+
+	// 优雅关闭
+	shutdownOnce sync.Once
+	dialWG       sync.WaitGroup // 跟踪 dialAndServe goroutine 退出
 }
 
 // newClientPool 创建新的连接池
 func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) (*clientPool, error) {
 	limit := int64(cfg.BackpressureLimitBytes)
 	if limit <= 0 {
-		limit = 1024 * 1024 // 默认 1MB
+		limit = DefaultBackpressureLimitBytes // 默认 8MB
 	}
 	p := &clientPool{
 		config:            cfg,
@@ -116,7 +120,7 @@ func newClientPool(cfg *Config, ctx context.Context, cancel context.CancelFunc) 
 	}
 
 	for i := 0; i < cfg.Connections; i++ {
-		p.writeQueues[i] = make(chan writeJob, 4096)
+		p.writeQueues[i] = make(chan writeJob, writeQueueSize)
 	}
 
 	return p, nil
@@ -159,7 +163,7 @@ func (p *clientPool) Start(relayNodes []string) {
 			// 重新分配写队列
 			newQueues := make([]chan writeJob, total)
 			for i := 0; i < total; i++ {
-				newQueues[i] = make(chan writeJob, 4096)
+				newQueues[i] = make(chan writeJob, writeQueueSize)
 			}
 			p.writeQueues = newQueues
 			p.connsWriteMutex = make([]sync.Mutex, total)
@@ -168,7 +172,7 @@ func (p *clientPool) Start(relayNodes []string) {
 			for nodeIdx, node := range bestNodes {
 				for j := 0; j < p.config.Connections; j++ {
 					chIdx := nodeIdx*p.config.Connections + j
-					go p.dialAndServe(chIdx, node.ip)
+					p.goDialAndServe(chIdx, node.ip)
 				}
 			}
 
@@ -186,7 +190,7 @@ func (p *clientPool) Start(relayNodes []string) {
 	// 没有指定中转节点或所有节点不可用,直连服务端
 	log.Printf("[客户端] 未使用中转节点,直连服务端,建立 %d 条连接", p.config.Connections)
 	for i := 0; i < p.config.Connections; i++ {
-		go p.dialAndServe(i, "")
+		p.goDialAndServe(i, "")
 	}
 
 	// 启动 PairWarmer 延迟监听器（在所有通道就绪后才启动）
@@ -199,6 +203,13 @@ func (p *clientPool) Start(relayNodes []string) {
 func (p *clientPool) Shutdown() {
 	log.Printf("[客户端] 正在关闭所有连接...")
 
+	p.shutdownOnce.Do(func() {
+		p.shutdown()
+	})
+}
+
+// shutdown 执行实际的关闭逻辑（仅执行一次，由 Shutdown 通过 sync.Once 保护）
+func (p *clientPool) shutdown() {
 	// 1. 停止中转节点管理器
 	p.relayManager.Stop()
 
@@ -215,7 +226,6 @@ func (p *clientPool) Shutdown() {
 
 	// 5. 优雅关闭所有 WebSocket 连接
 	p.wsConnsMu.Lock()
-	defer p.wsConnsMu.Unlock()
 
 	var wg sync.WaitGroup
 	for i, ws := range p.wsConns {
@@ -236,9 +246,28 @@ func (p *clientPool) Shutdown() {
 			p.wsConns[i] = nil
 		}
 	}
+	p.wsConnsMu.Unlock()
 	wg.Wait()
 
+	// 6. 等待所有 dialAndServe goroutine 退出（带超时保护，避免卡死）
+	doneCh := make(chan struct{})
+	go func() { p.dialWG.Wait(); close(doneCh) }()
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		log.Printf("[客户端] 等待拨号 goroutine 退出超时，强制返回")
+	}
+
 	log.Printf("[客户端] 所有连接已关闭")
+}
+
+// goDialAndServe 启动 dialAndServe goroutine 并纳入 WaitGroup 跟踪，确保 Shutdown 时能等待其退出。
+func (p *clientPool) goDialAndServe(idx int, ip string) {
+	p.dialWG.Add(1)
+	go func() {
+		defer p.dialWG.Done()
+		p.dialAndServe(idx, ip)
+	}()
 }
 
 // delayedStartPairWarmer 等待所有通道就绪后再启动 PairWarmer
@@ -288,6 +317,9 @@ var (
 	dialAndServeMaxRetries = 20
 	dialAndServeBaseDelay  = 3 * time.Second
 	dialAndServeMaxDelay   = 60 * time.Second
+
+	// writeQueueSize 单通道写队列容量（会话级队列）
+	writeQueueSize = 4096
 )
 
 // fastRetryState 记录快速重连状态
@@ -428,9 +460,10 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		currentDelay = dialAndServeBaseDelay
 		frs.OnSuccess()
 
-		// 标记节点成功
+		// 标记节点成功并计入负载（重连时按负载分散，避免扎堆同一节点）
 		if ip != "" && p.relayCount > 0 {
 			p.relayManager.MarkNodeSuccess(ip)
+			p.relayManager.Acquire(ip)
 		}
 
 		if ip != "" {
@@ -438,9 +471,17 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 			lastIP = ip
 		}
 		log.Printf("[客户端] 通道 %d%s 已连接", chID, relayInfo)
+		// 会话级写队列：每次连接使用独立队列，旧连接遗留的 writeWorker
+		// 只能消费旧队列（其连接已关闭，很快自行退出），不会与新连接的
+		// writeWorker 抢数据包（修复断线重连后请求被旧 worker 吞掉的问题）。
+		queue := make(chan writeJob, writeQueueSize)
 		p.wsConnsMu.Lock()
 		p.wsConns[idx] = wsConn
+		p.writeQueues[idx] = queue
 		p.wsConnsMu.Unlock()
+
+		// 先启动写工作者，确保 availableChannels 返回该通道时已有消费者就绪
+		go p.writeWorker(idx, wsConn, queue)
 
 		// 增加就绪通道计数
 		atomic.AddInt32(&p.readyChannels, 1)
@@ -451,7 +492,6 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		default:
 		}
 
-		go p.writeWorker(idx, wsConn, p.writeQueues[idx])
 		p.handleChannel(chID, wsConn)
 
 		_ = wsConn.Close()
@@ -473,6 +513,11 @@ func (p *clientPool) dialAndServe(idx int, ip string) {
 		}
 
 		p.cleanupChannel(chID)
+
+		// 释放节点负载占用
+		if ip != "" && p.relayCount > 0 {
+			p.relayManager.Release(ip)
+		}
 
 		log.Printf("[客户端] 通道 %d%s 断开,重连中...", chID, relayInfo)
 		select {
@@ -720,12 +765,16 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 		return fmt.Errorf("通道 %d 不可用", chID)
 	}
 
+	waitTimeout := p.config.WriteQueueWaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 100 * time.Millisecond
+	}
 	job := writeJob{msgType: msgType, data: data, size: int(size)}
 	select {
 	case queue <- job:
 		return nil
 	default:
-		timer := time.NewTimer(100 * time.Millisecond)
+		timer := time.NewTimer(waitTimeout)
 		defer timer.Stop()
 		select {
 		case queue <- job:
@@ -743,15 +792,21 @@ func (p *clientPool) asyncWriteDirect(chID int, msgType int, data []byte) error 
 
 // broadcastWrite 广播写入所有通道，返回成功写入的通道数
 func (p *clientPool) broadcastWrite(msgType int, data []byte) int {
+	// 先在锁内收集活跃通道索引，释放锁后再写入。
+	// asyncWriteDirect 内部会再次获取 wsConnsMu，若在此处持有读锁的同时调用，
+	// 会形成同 goroutine 对 sync.RWMutex 的可重入读锁，在有 writer 排队时自死锁。
 	p.wsConnsMu.RLock()
-	defer p.wsConnsMu.RUnlock()
+	idxs := make([]int, 0, len(p.wsConns))
+	for i, c := range p.wsConns {
+		if c != nil {
+			idxs = append(idxs, i)
+		}
+	}
+	p.wsConnsMu.RUnlock()
 
 	successCount := 0
-	for i, c := range p.wsConns {
-		if c == nil {
-			continue
-		}
-		if err := p.asyncWriteDirect(i+1, msgType, data); err == nil {
+	for _, idx := range idxs {
+		if err := p.asyncWriteDirect(idx+1, msgType, data); err == nil {
 			successCount++
 		}
 	}
@@ -837,9 +892,20 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 			}
 			p.mu.Unlock()
 			msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
-			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID[:16], pair.UplinkChID, pair.DownlinkChID, common.ShortID(connID))
-			_ = p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg)
-			return
+			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID, pair.UplinkChID, pair.DownlinkChID, common.ShortID(connID))
+			if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
+				return
+			}
+			// Hot Pair 上行通道发送失败：释放 Pair 并回退到广播，避免连接状态残留
+			log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, common.ShortID(connID))
+			p.mu.Lock()
+			if st = p.conns[connID]; st != nil {
+				st.pair = nil
+			}
+			p.mu.Unlock()
+			p.pairWarmer.ReleasePair(pair)
+			p.pairWarmer.InvalidateChannel(pair.UplinkChID)
+			// 继续走广播路径
 		}
 	}
 
@@ -945,6 +1011,13 @@ func (p *clientPool) Unregister(connID string) {
 		target = "-"
 	}
 
+	// 预绑定临时状态：仅清理 map，不输出访问日志、不关闭资源
+	if target == common.PrebindTarget {
+		delete(p.conns, connID)
+		p.mu.Unlock()
+		return
+	}
+
 	tcpConn := st.tcpConn
 	udpAssoc := st.udpAssoc
 	var pair *HotChannelPair
@@ -954,13 +1027,6 @@ func (p *clientPool) Unregister(connID string) {
 	}
 	delete(p.conns, connID)
 	p.mu.Unlock()
-
-	// 预绑定临时状态不输出访问日志
-	if target == common.PrebindTarget {
-		delete(p.conns, connID)
-		p.mu.Unlock()
-		return
-	}
 
 	log.Printf("[客户端] %s %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		client, typ, target, u, d, common.ShortID(connID))
@@ -1012,8 +1078,13 @@ func (p *clientPool) selectDownlink(connID string, chID int) (selected bool, cho
 	if chosen > 0 {
 		selected = false
 	} else {
-		// CAS：只有从未设置过 downlink 时才设置，避免竞态
-		if atomic.CompareAndSwapInt32(&st.downlink, 0, int32(chID)) {
+		// 预绑定路径：强制 uplink≠downlink。若当前通道即为 uplink，则让出，
+		// 由其他通道竞争成为下行，避免预绑定 Pair 上下行落入同一通道。
+		// 普通 TCP 路径（target 非 PrebindTarget）不受影响。
+		if st.target == common.PrebindTarget && st.uplink > 0 && chID == st.uplink {
+			// 让出，不设置 downlink，chosen 保持 0
+		} else if atomic.CompareAndSwapInt32(&st.downlink, 0, int32(chID)) {
+			// CAS：只有从未设置过 downlink 时才设置，避免竞态
 			chosen = chID
 			selected = true
 			start = st.start
@@ -1208,9 +1279,8 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			p.noteUplink(connID, uplinkChID)
 
 			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
-			selected, _, _, target, up, _ := p.selectDownlink(connID, chID)
+			selected, chosen, _, target, up, _ := p.selectDownlink(connID, chID)
 			if selected {
-				chosen := int(atomic.LoadInt32(&p.conns[connID].downlink))
 				clientAddr := ""
 				p.mu.RLock()
 				if st := p.conns[connID]; st != nil {

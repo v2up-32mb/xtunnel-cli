@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"x-tunnel/common"
@@ -49,7 +50,8 @@ type Config struct {
 	WriteBufferSize int // 写缓冲区大小
 
 	// 背压控制
-	BackpressureLimitBytes int // 全局队列背压阈值（字节），0 表示使用默认值 1MB
+	BackpressureLimitBytes int           // 全局队列背压阈值（字节），0 表示使用默认值 8MB
+	WriteQueueWaitTimeout  time.Duration // 写队列满时的等待超时，0 表示使用默认值 100ms
 
 	// SOCKS5 连接限制
 	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
@@ -65,22 +67,26 @@ type Config struct {
 	MaxFastRetryConsecutive int           // 连续进入 fast retry 的最大次数，默认 3
 }
 
+// DefaultBackpressureLimitBytes 全局写队列背压阈值默认值（8MB，下载大文件时不易触发）
+const DefaultBackpressureLimitBytes = 8 << 20
+
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *Config {
 	return &Config{
-		Connections:          3,
-		DialTimeout:          3 * time.Second,
-		HandshakeTimeout:     5 * time.Second,
-		ReadTimeout:          15 * time.Second,
-		WriteTimeout:         5 * time.Second,
-		PingInterval:         5 * time.Second,
-		ReconnectDelay:       1 * time.Second,
-		ConnectTimeout:       15 * time.Second,
-		IPStrategy:           common.IPStrategyDefault,
-		ReadBufferSize:       64 * 1024,
-		WriteBufferSize:      64 * 1024,
-		BackpressureLimitBytes: 1024 * 1024, // 默认 1MB
-		UDPBlockedPorts:      []int{443},
+		Connections:             3,
+		DialTimeout:             3 * time.Second,
+		HandshakeTimeout:        5 * time.Second,
+		ReadTimeout:             15 * time.Second,
+		WriteTimeout:            5 * time.Second,
+		PingInterval:            5 * time.Second,
+		ReconnectDelay:          1 * time.Second,
+		ConnectTimeout:          15 * time.Second,
+		IPStrategy:              common.IPStrategyDefault,
+		ReadBufferSize:          64 * 1024,
+		WriteBufferSize:         64 * 1024,
+		BackpressureLimitBytes:  DefaultBackpressureLimitBytes, // 默认 8MB
+		WriteQueueWaitTimeout:   100 * time.Millisecond,
+		UDPBlockedPorts:         []int{443},
 		MaxSOCKS5Connections:    1024, // 默认最大 1024 个并发连接
 		EnableHotPair:           false,
 		HotPairCount:            1,
@@ -95,6 +101,9 @@ func DefaultConfig() *Config {
 func (c *Config) Validate() error {
 	if c.ServerAddr == "" {
 		return ErrInvalidServerAddr
+	}
+	if !strings.HasPrefix(c.ServerAddr, "wss://") && !strings.HasPrefix(c.ServerAddr, "ws://") {
+		return errors.New("server address must start with wss:// or ws://")
 	}
 
 	if c.Connections <= 0 {

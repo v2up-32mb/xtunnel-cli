@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"log"
+	"math/rand"
 	"net"
 	"sort"
 	"sync"
@@ -34,7 +35,12 @@ type RelayNodeManager struct {
 	cancel      context.CancelFunc
 	lookupIP    func(host string) ([]net.IP, error)
 	healthScore int32
+	loadCounts  map[string]int32 // 每节点活跃连接数（负载均衡）
+	rng         *rand.Rand       // 独立随机源（加权选择）
 }
+
+// maxLoadPerNode 单节点负载因子的满负荷基准（近似取 Connections*4 的上限）。
+const maxLoadPerNode = 16
 
 type relayNodeSnapshot struct {
 	node        *RelayNode
@@ -51,9 +57,11 @@ type relayNodeSnapshot struct {
 func NewRelayNodeManager() *RelayNodeManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RelayNodeManager{
-		ctx:      ctx,
-		cancel:   cancel,
-		lookupIP: net.LookupIP,
+		ctx:        ctx,
+		cancel:     cancel,
+		lookupIP:   net.LookupIP,
+		loadCounts: make(map[string]int32),
+		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -528,10 +536,24 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *relayNodeSn
 		candidates = selectHealthy()
 	}
 	if len(candidates) > 0 {
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].score > candidates[j].score
-		})
-		return &candidates[0]
+		// 加权负载均衡：权重 = 评分 × 负载因子（活跃连接数越高权重越低），
+		// 避免断线重连时所有通道扎堆选择同一个最高分节点。
+		total := 0.0
+		weights := make([]float64, len(candidates))
+		for i, c := range candidates {
+			weights[i] = m.candidateWeight(c.ip, c.score)
+			total += weights[i]
+		}
+		pick := m.rng.Float64() * total
+		for i, w := range weights {
+			pick -= w
+			if pick < 0 {
+				res := candidates[i]
+				return &res
+			}
+		}
+		res := candidates[len(candidates)-1]
+		return &res
 	}
 
 	fallback := m.snapshotNodes()
@@ -553,4 +575,40 @@ func (m *RelayNodeManager) SelectNodeExcluding(excludeIPs []string) *relayNodeSn
 		return filtered[i].score > filtered[j].score
 	})
 	return &filtered[0]
+}
+
+// Acquire 记录节点被占用一条连接（负载均衡）。
+func (m *RelayNodeManager) Acquire(ip string) {
+	m.mu.Lock()
+	m.loadCounts[ip]++
+	m.mu.Unlock()
+}
+
+// Release 释放节点上的一条连接占用。
+func (m *RelayNodeManager) Release(ip string) {
+	m.mu.Lock()
+	if count := m.loadCounts[ip]; count > 1 {
+		m.loadCounts[ip] = count - 1
+	} else {
+		delete(m.loadCounts, ip)
+	}
+	m.mu.Unlock()
+}
+
+// AcquiredCount 返回节点的当前活跃连接数。
+func (m *RelayNodeManager) AcquiredCount(ip string) int32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.loadCounts[ip]
+}
+
+// candidateWeight 计算候选节点的加权选择权重：
+// 权重 = 评分 × 负载因子；负载因子 = 1 - 活跃数/基准 * 0.5，下限 10%。
+func (m *RelayNodeManager) candidateWeight(ip string, score float64) float64 {
+	load := float64(m.AcquiredCount(ip))
+	loadFactor := 1.0 - (load/maxLoadPerNode)*0.5
+	if loadFactor < 0.1 {
+		loadFactor = 0.1
+	}
+	return score * loadFactor
 }

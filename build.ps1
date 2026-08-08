@@ -19,7 +19,7 @@ function Show-Help {
     Write-Host "  -v, -verbose    显示详细的编译命令"
     Write-Host "  -c, -clean      清理 bin 目录后重新编译"
     Write-Host ""
-    Write-Host "此脚本将编译以下平台的 client 和 server:"
+    Write-Host "此脚本将编译以下平台的 client:"
     Write-Host "  - linux/amd64"
     Write-Host "  - linux/arm64"
     Write-Host "  - linux/armv7"
@@ -66,7 +66,7 @@ if ($clean) {
 }
 
 # 统计变量
-$totalBuilds = $platforms.Count * 2  # 每个平台编译 client 和 server
+$totalBuilds = $platforms.Count  # 本分支仅编译 client
 $successCount = 0
 $failedCount = 0
 $failedBuilds = @()
@@ -109,12 +109,8 @@ function Build-Binary {
     # 输出文件名
     $output = "bin\xtunnel-${target}-${os}-${archName}${ext}"
 
-    # 源文件列表
-    if ($target -eq "client") {
-        $sources = ".\client\cmd\x-tunnel-client"
-    } else {
-        $sources = ".\server\cmd\x-tunnel-server"
-    }
+    # 源文件列表（本分支仅保留客户端）
+    $sources = ".\client\cmd\x-tunnel-client"
 
     # 显示编译信息
     Write-Host -NoNewline "编译: ${target} ${os}/${archName}... "
@@ -158,14 +154,6 @@ foreach ($platform in $platforms) {
         $failedBuilds += "client ${os}/${archName}"
     }
 
-    # 编译 server
-    $result = Build-Binary -target "server" -platform $platform
-    if ($result) {
-        $successCount++
-    } else {
-        $failedCount++
-        $failedBuilds += "server ${os}/${archName}"
-    }
 }
 
 # 计算耗时
