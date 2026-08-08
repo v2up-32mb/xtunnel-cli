@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM x-tunnel 跨平台编译脚本 (Windows CMD)
 REM 支持交叉编译多个平台
 
