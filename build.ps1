@@ -1,4 +1,4 @@
-# x-tunnel 跨平台编译脚本 (PowerShell)
+﻿# x-tunnel 跨平台编译脚本 (PowerShell)
 # 支持交叉编译多个平台
 
 param(
