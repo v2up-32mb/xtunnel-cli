@@ -38,7 +38,7 @@ type Config struct {
 	WriteBufferSize int // 写缓冲区大小
 
 	// 背压控制
-	BackpressureLimitBytes int // 全局队列背压阈值（字节），0 表示使用默认值 1MB
+	BackpressureLimitBytes int // 全局队列背压阈值（字节），0 表示使用默认值 16MB
 
 	// 接入限制
 	MaxTotalChannels     int // 最大总通道数（0 表示无限制）
@@ -57,7 +57,7 @@ func DefaultConfig() *Config {
 		HandshakeTimeout:     5 * time.Second,
 		ReadBufferSize:         64 * 1024,
 		WriteBufferSize:        64 * 1024,
-		BackpressureLimitBytes: 1024 * 1024, // 默认 1MB
+		BackpressureLimitBytes: 16 << 20, // 默认 16MB
 		MaxTotalChannels:     0,
 		MaxChannelsPerClient: 0,
 	}
