@@ -46,7 +46,7 @@ type serverPool struct {
 func newServerPool(token string, config *Config) *serverPool {
 	limit := int64(config.BackpressureLimitBytes)
 	if limit <= 0 {
-		limit = 1024 * 1024 // 默认 1MB
+		limit = 16 << 20 // 默认 16MB
 	}
 	return &serverPool{
 		config:            config,
