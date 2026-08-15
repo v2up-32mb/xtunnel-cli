@@ -13,7 +13,7 @@ import (
 // ======================== TCP 处理 ========================
 
 // handleTCPConnect 处理 TCP 连接请求
-func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
+func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, meta []byte) {
 	if len(meta) < 1 {
 		p.sendDownlink(connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
 		return
@@ -38,9 +38,9 @@ func (p *serverPool) handleTCPConnect(chID int, connID string, meta []byte) {
 		p.conns[connID] = st
 		p.mu.Unlock()
 
-		// 获取客户端地址
+		// 获取客户端地址（chID 属于该来源客户端自己的编号空间）
 		p.mu.RLock()
-		wsConn := p.chConns[chID]
+		wsConn := p.clientChConns[clientID][chID]
 		p.mu.RUnlock()
 		if wsConn != nil {
 			st.clientID = wsConn.clientID
@@ -173,7 +173,7 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 }
 
 // handleSelectDownlink 处理选择下行通道
-func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) {
+func (p *serverPool) handleSelectDownlink(clientID string, chID int, connID string, meta []byte) {
 	// meta 包含客户端选择的下行通道号（4字节,大端序）
 	var downlinkChID int
 	if len(meta) >= 4 {
@@ -185,7 +185,8 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 
 	p.mu.RLock()
 	st := p.conns[connID]
-	wsConn := p.chConns[downlinkChID]
+	// 下行通道从消息来源客户端自己的编号空间中查找
+	wsConn := p.clientChConns[clientID][downlinkChID]
 	p.mu.RUnlock()
 
 	if st == nil {
@@ -201,7 +202,7 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 	// 验证消息是否从上行通道发送,且下行通道仍属于同一客户端
 	st.mu.RLock()
 	uplinkChID := st.uplinkChID
-	clientID := st.clientID
+	ownerID := st.clientID
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
@@ -209,9 +210,9 @@ func (p *serverPool) handleSelectDownlink(chID int, connID string, meta []byte) 
 			chID, uplinkChID, common.ShortID(connID))
 		return
 	}
-	if clientID != "" && wsConn.clientID != "" && wsConn.clientID != clientID {
+	if ownerID != "" && wsConn.clientID != "" && wsConn.clientID != ownerID {
 		log.Printf("[服务端] 警告: 客户端 %s 试图选择其他客户端 %s 的通道 %d 作为下行通道, connID:%s",
-			clientID, wsConn.clientID, downlinkChID, common.ShortID(connID))
+			ownerID, wsConn.clientID, downlinkChID, common.ShortID(connID))
 		return
 	}
 
@@ -232,7 +233,7 @@ func (p *serverPool) handleTCPClose(chID int, connID string) {
 }
 
 // handlePrebindRequest 处理预绑定请求
-func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) {
+func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID string, meta []byte) {
 	if len(meta) < 1 {
 		return
 	}
@@ -255,7 +256,7 @@ func (p *serverPool) handlePrebindRequest(chID int, connID string, meta []byte) 
 	p.mu.Unlock()
 
 	p.mu.RLock()
-	wsConn := p.chConns[chID]
+	wsConn := p.clientChConns[clientID][chID]
 	p.mu.RUnlock()
 	if wsConn != nil {
 		st.clientID = wsConn.clientID
@@ -298,7 +299,7 @@ func (p *serverPool) forwardTargetToClient(st *ServerConnState) {
 // ======================== UDP 处理 ========================
 
 // handleUDPConnect 处理 UDP 连接请求
-func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
+func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, meta []byte) {
 	if len(meta) < 1 {
 		p.sendDownlink(connID, common.MsgConnStatus, []byte{byte(common.StatusERR)}, nil)
 		return
@@ -343,7 +344,7 @@ func (p *serverPool) handleUDPConnect(chID int, connID string, meta []byte) {
 	p.mu.Unlock()
 
 	p.mu.RLock()
-	wsConn := p.chConns[chID]
+	wsConn := p.clientChConns[clientID][chID]
 	p.mu.RUnlock()
 	if wsConn != nil {
 		st.clientID = wsConn.clientID

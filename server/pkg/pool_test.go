@@ -20,7 +20,7 @@ func newTestServerPool() *serverPool {
 		config:            DefaultConfig(),
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
-		chConns:           make(map[int]*ServerWSConn),
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  1024,
 		backpressureState: int32(common.BackpressureNormal),
 	}
@@ -32,7 +32,7 @@ func TestHandlePrebindRequestCleansUpState(t *testing.T) {
 	meta := []byte{0}
 	meta = append(meta, common.PrebindTarget...)
 
-	p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
+	p.handleMessage("", 1, 10, common.MsgPrebindRequest, connID, meta, nil)
 
 	p.mu.RLock()
 	_, exists := p.conns[connID]
@@ -48,7 +48,7 @@ func TestPrebindDoesNotLeakConns(t *testing.T) {
 	meta = append(meta, common.PrebindTarget...)
 	for i := 0; i < 1000; i++ {
 		connID := fmt.Sprintf("prebind-%d", i)
-		p.handleMessage(1, 10, common.MsgPrebindRequest, connID, meta, nil)
+		p.handleMessage("", 1, 10, common.MsgPrebindRequest, connID, meta, nil)
 	}
 	p.mu.RLock()
 	n := len(p.conns)
@@ -72,9 +72,9 @@ func TestCheckOriginDefaultAllow(t *testing.T) {
 
 func TestServerPoolStatsCountsActiveChannels(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: []*ServerWSConn{{closed: false}, {closed: true}, nil},
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       []*ServerWSConn{{closed: false}, {closed: true}, nil},
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.conns["a"] = &ServerConnState{}
 	p.conns["b"] = &ServerConnState{}
@@ -96,10 +96,10 @@ func TestServerWSConnCloseClosesBufferedWriteChan(t *testing.T) {
 	defer cleanup()
 
 	p := &serverPool{
-		config:  &Config{WriteTimeout: time.Second},
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 1),
-		chConns: make(map[int]*ServerWSConn),
+		config:        &Config{WriteTimeout: time.Second},
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 1),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	wsConn := &ServerWSConn{
 		ws:        conn,
@@ -110,7 +110,10 @@ func TestServerWSConnCloseClosesBufferedWriteChan(t *testing.T) {
 	queue := wsConn.writeChan
 	queue <- writeTask{msgType: websocket.BinaryMessage, data: []byte("x"), size: 1}
 	p.wsConns[0] = wsConn
-	p.chConns[1] = wsConn
+	if p.clientChConns[""] == nil {
+		p.clientChConns[""] = make(map[int]*ServerWSConn)
+	}
+	p.clientChConns[""][1] = wsConn
 
 	done := make(chan struct{})
 	go func() {
@@ -142,7 +145,7 @@ func TestAsyncWriteQueueFullDoesNotTriggerBackpressureState(t *testing.T) {
 	p := &serverPool{
 		config:            &Config{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
-		chConns:           make(map[int]*ServerWSConn),
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  8,
 		backpressureState: int32(common.BackpressureNormal),
 	}
@@ -170,7 +173,7 @@ func TestAsyncWriteHighWaterReturnsPromptly(t *testing.T) {
 		config:            &Config{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 1),
-		chConns:           make(map[int]*ServerWSConn),
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  8,
 		backpressureState: int32(common.BackpressureNormal),
 	}
@@ -180,7 +183,10 @@ func TestAsyncWriteHighWaterReturnsPromptly(t *testing.T) {
 		writeChan: make(chan writeTask, 1),
 	}
 	p.wsConns[0] = wsConn
-	p.chConns[1] = wsConn
+	if p.clientChConns[""] == nil {
+		p.clientChConns[""] = make(map[int]*ServerWSConn)
+	}
+	p.clientChConns[""][1] = wsConn
 
 	done := make(chan error, 1)
 	go func() {
@@ -202,7 +208,7 @@ func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 		config:            &Config{ReadBufferSize: 8},
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 1),
-		chConns:           make(map[int]*ServerWSConn),
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  64,
 		backpressureState: int32(common.BackpressureNormal),
 	}
@@ -213,7 +219,10 @@ func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 	}
 	wsConn.writeChan <- writeTask{msgType: websocket.BinaryMessage, data: []byte("busy"), size: 4}
 	p.wsConns[0] = wsConn
-	p.chConns[1] = wsConn
+	if p.clientChConns[""] == nil {
+		p.clientChConns[""] = make(map[int]*ServerWSConn)
+	}
+	p.clientChConns[""][1] = wsConn
 
 	done := make(chan struct{})
 	go func() {
@@ -234,16 +243,17 @@ func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 
 func TestSendDownlinkBeforeSelectionOnlyTargetsOwningClient(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 3),
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 3),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[2] = &ServerWSConn{chID: 3, clientID: "client-b", pool: p, writeChan: make(chan writeTask, 1)}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
-	p.chConns[3] = p.wsConns[2]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
+		"client-b": {3: p.wsConns[2]},
+	}
 	p.conns["tcp-conn"] = &ServerConnState{connID: "tcp-conn", clientID: "client-a"}
 
 	if err := p.sendDownlink("tcp-conn", common.MsgConnStatus, []byte{byte(common.StatusOK)}, nil); err != nil {
@@ -262,15 +272,16 @@ func TestSendDownlinkBeforeSelectionOnlyTargetsOwningClient(t *testing.T) {
 
 func TestBroadcastWriteRemainsGlobalAcrossClients(t *testing.T) {
 	p := &serverPool{
-		wsConns: make([]*ServerWSConn, 3),
-		chConns: make(map[int]*ServerWSConn),
+		wsConns:       make([]*ServerWSConn, 3),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[2] = &ServerWSConn{chID: 3, clientID: "client-b", pool: p, writeChan: make(chan writeTask, 1)}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
-	p.chConns[3] = p.wsConns[2]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
+		"client-b": {3: p.wsConns[2]},
+	}
 
 	if err := p.broadcastWrite(websocket.BinaryMessage, []byte("hello")); err != nil {
 		t.Fatalf("broadcastWrite failed: %v", err)
@@ -288,7 +299,7 @@ func TestHandleWebSocketRejectsWhenMaxTotalChannelsReached(t *testing.T) {
 	cfg.MaxTotalChannels = 1
 	p := newServerPool("token", cfg)
 	p.wsConns = []*ServerWSConn{{chID: 1, clientID: "client-a", pool: p}}
-	p.chConns[1] = p.wsConns[0]
+	p.clientChConns = map[string]map[int]*ServerWSConn{"client-a": {1: p.wsConns[0]}}
 
 	server := httptest.NewServer(http.HandlerFunc(p.handleWebSocket))
 	defer server.Close()
@@ -312,7 +323,7 @@ func TestHandleWebSocketRejectsWhenMaxChannelsPerClientReached(t *testing.T) {
 	cfg.MaxChannelsPerClient = 1
 	p := newServerPool("token", cfg)
 	p.wsConns = []*ServerWSConn{{chID: 1, clientID: "client-a", pool: p}}
-	p.chConns[1] = p.wsConns[0]
+	p.clientChConns = map[string]map[int]*ServerWSConn{"client-a": {1: p.wsConns[0]}}
 
 	server := httptest.NewServer(http.HandlerFunc(p.handleWebSocket))
 	defer server.Close()
@@ -333,16 +344,16 @@ func TestHandleWebSocketRejectsWhenMaxChannelsPerClientReached(t *testing.T) {
 
 func TestSendDownlinkAfterSelectionOnlyTargetsChosenChannel(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 3),
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 3),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
 	p.wsConns[2] = &ServerWSConn{chID: 3, clientID: "client-a", pool: p, writeChan: make(chan writeTask, 1)}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
-	p.chConns[3] = p.wsConns[2]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1], 3: p.wsConns[2]},
+	}
 	p.conns["tcp-conn"] = &ServerConnState{connID: "tcp-conn", clientID: "client-a", downlinkChID: 2}
 
 	if err := p.sendDownlink("tcp-conn", common.MsgConnStatus, []byte{byte(common.StatusOK)}, nil); err != nil {
@@ -364,17 +375,18 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 		config:            DefaultConfig(),
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 2),
-		chConns:           make(map[int]*ServerWSConn),
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  1024,
 		backpressureState: int32(common.BackpressureNormal),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
+	}
 
 	meta := append([]byte{byte(common.IPStrategyDefault)}, []byte("127.0.0.1:53")...)
-	p.handleUDPConnect(1, "udp-conn", meta)
+	p.handleUDPConnect("client-a", 1, "udp-conn", meta)
 
 	p.mu.RLock()
 	first := p.conns["udp-conn"]
@@ -389,7 +401,7 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 		}
 	}()
 
-	p.handleUDPConnect(2, "udp-conn", meta)
+	p.handleUDPConnect("client-a", 2, "udp-conn", meta)
 
 	p.mu.RLock()
 	current := p.conns["udp-conn"]
@@ -409,10 +421,10 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 
 func TestServerStatsCountSentBytesFromAsyncWrite(t *testing.T) {
 	p := &serverPool{
-		config:  &Config{WriteTimeout: time.Second},
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 1),
-		chConns: make(map[int]*ServerWSConn),
+		config:        &Config{WriteTimeout: time.Second},
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 1),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	conn, cleanup := newServerTestWebSocketConn(t)
 	defer cleanup()
@@ -424,7 +436,10 @@ func TestServerStatsCountSentBytesFromAsyncWrite(t *testing.T) {
 		writeChan: make(chan writeTask, 1),
 	}
 	p.wsConns[0] = wsConn
-	p.chConns[1] = wsConn
+	if p.clientChConns[""] == nil {
+		p.clientChConns[""] = make(map[int]*ServerWSConn)
+	}
+	p.clientChConns[""][1] = wsConn
 
 	msg := []byte("hello")
 	if err := wsConn.asyncWrite(websocket.BinaryMessage, msg); err != nil {
@@ -456,7 +471,7 @@ func TestServerStatsCountReceivedBytesFromHandleMessage(t *testing.T) {
 		t.Fatalf("decode message failed: %v", err)
 	}
 
-	p.handleMessage(1, len(msg), msgType, connID, meta, payload)
+	p.handleMessage("", 1, len(msg), msgType, connID, meta, payload)
 
 	if got := p.Stats().BytesReceived; got != uint64(len(msg)) {
 		t.Fatalf("expected bytes received %d, got %d", len(msg), got)
@@ -500,21 +515,23 @@ func TestHandleTCPDataIgnoresNonUplinkBeforeTargetConnect(t *testing.T) {
 
 func TestHandleSelectDownlinkRejectsForeignClientChannel(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 2),
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 2),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-b", pool: p}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0]},
+		"client-b": {2: p.wsConns[1]},
+	}
 
 	st := &ServerConnState{connID: "tcp-conn", uplinkChID: 1, clientID: "client-a", target: "example.com:443"}
 	p.conns[st.connID] = st
 
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint32(meta, 2)
-	p.handleSelectDownlink(1, st.connID, meta)
+	p.handleSelectDownlink("client-a", 1, st.connID, meta)
 
 	st.mu.RLock()
 	defer st.mu.RUnlock()
@@ -525,21 +542,22 @@ func TestHandleSelectDownlinkRejectsForeignClientChannel(t *testing.T) {
 
 func TestHandleSelectDownlinkAcceptsSameClientChannel(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 2),
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 2),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
+	}
 
 	st := &ServerConnState{connID: "tcp-conn", uplinkChID: 1, clientID: "client-a", target: "example.com:443"}
 	p.conns[st.connID] = st
 
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint32(meta, 2)
-	p.handleSelectDownlink(1, st.connID, meta)
+	p.handleSelectDownlink("client-a", 1, st.connID, meta)
 
 	st.mu.RLock()
 	defer st.mu.RUnlock()
@@ -550,25 +568,25 @@ func TestHandleSelectDownlinkAcceptsSameClientChannel(t *testing.T) {
 
 func TestHandleSelectDownlinkKeepsFirstWinner(t *testing.T) {
 	p := &serverPool{
-		conns:   make(map[string]*ServerConnState),
-		wsConns: make([]*ServerWSConn, 3),
-		chConns: make(map[int]*ServerWSConn),
+		conns:         make(map[string]*ServerConnState),
+		wsConns:       make([]*ServerWSConn, 3),
+		clientChConns: make(map[string]map[int]*ServerWSConn),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p}
 	p.wsConns[2] = &ServerWSConn{chID: 3, clientID: "client-a", pool: p}
-	p.chConns[1] = p.wsConns[0]
-	p.chConns[2] = p.wsConns[1]
-	p.chConns[3] = p.wsConns[2]
+	p.clientChConns = map[string]map[int]*ServerWSConn{
+		"client-a": {1: p.wsConns[0], 2: p.wsConns[1], 3: p.wsConns[2]},
+	}
 
 	st := &ServerConnState{connID: "tcp-conn", uplinkChID: 1, clientID: "client-a", target: "example.com:443"}
 	p.conns[st.connID] = st
 
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint32(meta, 2)
-	p.handleSelectDownlink(1, st.connID, meta)
+	p.handleSelectDownlink("client-a", 1, st.connID, meta)
 	binary.BigEndian.PutUint32(meta, 3)
-	p.handleSelectDownlink(1, st.connID, meta)
+	p.handleSelectDownlink("client-a", 1, st.connID, meta)
 
 	st.mu.RLock()
 	defer st.mu.RUnlock()
@@ -671,10 +689,10 @@ func TestHandleTCPConnectUsesRemoteAddrForClientAddr(t *testing.T) {
 		remoteAddr: "203.0.113.10:4567",
 		closed:     true,
 	}}
-	p.chConns[1] = p.wsConns[0]
+	p.clientChConns = map[string]map[int]*ServerWSConn{"client-a": {1: p.wsConns[0]}}
 
 	meta := append([]byte{0}, []byte("203.0.113.1:65000")...)
-	p.handleTCPConnect(1, "conn-1", meta)
+	p.handleTCPConnect("client-a", 1, "conn-1", meta)
 
 	p.mu.RLock()
 	st := p.conns["conn-1"]

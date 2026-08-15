@@ -15,8 +15,19 @@ import (
 )
 
 // maxAllowedChID 客户端可指定的通道 ID 上限。
-// 防止恶意客户端传入巨大 ch_id 导致 wsConns 切片无限扩容（OOM）。
+// 防止恶意客户端传入巨大 ch_id 导致内部映射无限增长（OOM）。
 const maxAllowedChID = 65535
+
+// allocClientChIDLocked 在指定客户端的通道编号空间内分配最小未占用 chID。
+// 返回 0 表示该客户端编号已用尽。调用方需持有 p.mu。
+func (p *serverPool) allocClientChIDLocked(clientID string) int {
+	for i := 1; i <= maxAllowedChID; i++ {
+		if existing := p.clientChConns[clientID][i]; existing == nil || existing.closed {
+			return i
+		}
+	}
+	return 0
+}
 
 // serverPool 服务端连接池
 type serverPool struct {
@@ -31,9 +42,11 @@ type serverPool struct {
 
 	// WebSocket 连接
 	wsConns []*ServerWSConn
-	chConns map[int]*ServerWSConn
 
-	nextChID int
+	// clientID -> chID -> wsConn
+	// 每个客户端拥有独立的通道编号空间：不同客户端的 ch_id 可以相同，
+	// 不会互相占用/拒绝（协议路由始终能通过 conn 状态或来源连接定位客户端）。
+	clientChConns map[string]map[int]*ServerWSConn
 
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
@@ -46,15 +59,14 @@ type serverPool struct {
 func newServerPool(token string, config *Config) *serverPool {
 	limit := int64(config.BackpressureLimitBytes)
 	if limit <= 0 {
-		limit = 16 << 20 // 默认 16MB
+		limit = 32 << 20 // 默认 32MB
 	}
 	return &serverPool{
 		config:            config,
 		token:             token,
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
-		chConns:           make(map[int]*ServerWSConn),
-		nextChID:          1,
+		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  limit,
 		backpressureState: int32(common.BackpressureNormal),
 	}
@@ -103,11 +115,15 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// 如果客户端没有提供 ch_id,服务端自动分配
+		// 如果客户端没有提供 ch_id,服务端在该客户端的编号空间内自动分配
 		p.mu.Lock()
-		chID = p.nextChID
-		p.nextChID++
+		chID = p.allocClientChIDLocked(clientID)
 		p.mu.Unlock()
+		if chID == 0 {
+			log.Printf("[服务端] 拒绝客户端 %s: 该客户端通道编号已用尽", clientID)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	totalActive, clientActive := p.countActiveChannels(clientID)
@@ -150,25 +166,21 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[服务端] 客户端 %s 在升级后命中通道上限，已关闭新通道", clientID)
 		return
 	}
-	// 扩展切片
-	for chID > len(p.wsConns) {
-		p.wsConns = append(p.wsConns, nil)
-	}
-	// 检查 ch_id 是否已被活跃连接占用，防止通道劫持。
+	// 检查 ch_id 是否已被该客户端自身的活跃连接占用，防止通道劫持。
+	// 不同客户端的 ch_id 相互独立，互不拒绝；仅同客户端内已占用且未断开时拒绝。
 	// 仅当旧连接已断开（closed）时才允许新连接接管，兼容正常断线重连。
-	if existing := p.chConns[chID]; existing != nil && !existing.closed {
+	if existing := p.clientChConns[clientID][chID]; existing != nil && !existing.closed {
 		p.mu.Unlock()
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "channel id in use"), time.Now().Add(p.config.WriteTimeout))
 		_ = ws.Close()
-		log.Printf("[服务端] 拒绝客户端 %s: ch_id %d 已被占用", clientID, chID)
+		log.Printf("[服务端] 拒绝客户端 %s: ch_id %d 已被该客户端占用", clientID, chID)
 		return
 	}
-	if chID == len(p.wsConns) {
-		p.wsConns = append(p.wsConns, wsConn)
-	} else {
-		p.wsConns[chID-1] = wsConn
+	if p.clientChConns[clientID] == nil {
+		p.clientChConns[clientID] = make(map[int]*ServerWSConn)
 	}
-	p.chConns[chID] = wsConn
+	p.clientChConns[clientID][chID] = wsConn
+	p.wsConns = append(p.wsConns, wsConn)
 	p.mu.Unlock()
 
 	log.Printf("[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
@@ -228,26 +240,27 @@ func (p *serverPool) addReceivedBytes(n int) {
 }
 
 // handleMessage 处理消息
-func (p *serverPool) handleMessage(chID int, rawLen int, msgType common.MessageType, connID string, meta, payload []byte) {
+// clientID 是消息来源 WebSocket 连接所属的客户端，用于在客户端各自的通道编号空间内路由。
+func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType common.MessageType, connID string, meta, payload []byte) {
 	p.addReceivedBytes(rawLen)
 	switch msgType {
 	case common.MsgTCPConnect:
-		p.handleTCPConnect(chID, connID, meta)
+		p.handleTCPConnect(clientID, chID, connID, meta)
 
 	case common.MsgTCPData:
 		p.handleTCPData(chID, connID, payload)
 
 	case common.MsgSelectDownlink:
-		p.handleSelectDownlink(chID, connID, meta)
+		p.handleSelectDownlink(clientID, chID, connID, meta)
 
 	case common.MsgTCPClose:
 		p.handleTCPClose(chID, connID)
 
 	case common.MsgPrebindRequest:
-		p.handlePrebindRequest(chID, connID, meta)
+		p.handlePrebindRequest(clientID, chID, connID, meta)
 
 	case common.MsgUDPConnect:
-		p.handleUDPConnect(chID, connID, meta)
+		p.handleUDPConnect(clientID, chID, connID, meta)
 
 	case common.MsgUDPData:
 		p.handleUDPData(chID, connID, meta, payload)
@@ -273,8 +286,8 @@ func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, met
 	st.mu.RUnlock()
 
 	if downlink > 0 {
-		// 已选择下行通道:单播
-		return p.sendToChannel(downlink, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
+		// 已选择下行通道:单播（按该连接所属客户端定位通道）
+		return p.sendToChannel(clientID, downlink, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
 	}
 
 	// 未选择:只广播给同一客户端的活跃通道
@@ -313,36 +326,45 @@ func (p *serverPool) broadcastWriteToClient(clientID string, msgType int, data [
 	return nil
 }
 
-// sendToChannel 发送到指定通道
-func (p *serverPool) sendToChannel(chID int, msgType int, data []byte) error {
+// sendToChannel 发送到指定客户端的指定通道
+func (p *serverPool) sendToChannel(clientID string, chID int, msgType int, data []byte) error {
 	p.mu.RLock()
-	wsConn := p.chConns[chID]
+	wsConn := p.clientChConns[clientID][chID]
 	p.mu.RUnlock()
 
 	if wsConn == nil || wsConn.closed {
-		return fmt.Errorf("通道 %d 不可用", chID)
+		return fmt.Errorf("客户端 %s 通道 %d 不可用", common.ShortID(clientID), chID)
 	}
 
 	_ = wsConn.asyncWrite(msgType, data)
 	return nil
 }
 
-// cleanupChannel 清理通道
-func (p *serverPool) cleanupChannel(chID int) {
+// cleanupChannel 清理指定客户端的通道
+func (p *serverPool) cleanupChannel(clientID string, chID int) {
 	p.mu.Lock()
 
 	var wsConn *ServerWSConn
-	if chID <= len(p.wsConns) {
-		wsConn = p.wsConns[chID-1]
-		p.wsConns[chID-1] = nil
+	if m := p.clientChConns[clientID]; m != nil {
+		wsConn = m[chID]
+		delete(m, chID)
+		if len(m) == 0 {
+			delete(p.clientChConns, clientID)
+		}
 	}
-	delete(p.chConns, chID)
+	for i, wc := range p.wsConns {
+		if wc == wsConn && wc != nil {
+			p.wsConns[i] = nil
+			break
+		}
+	}
 
-	// 清理使用此通道的连接
+	// 清理使用此通道的连接（只清理属于同一客户端的连接，
+	// 避免多客户端使用相同 ch_id 时误关其他客户端的连接）
 	var toClose []string
 	for connID, st := range p.conns {
 		st.mu.RLock()
-		useCh := st.uplinkChID == chID || st.downlinkChID == chID
+		useCh := st.clientID == clientID && (st.uplinkChID == chID || st.downlinkChID == chID)
 		st.mu.RUnlock()
 
 		if useCh {

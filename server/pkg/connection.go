@@ -101,7 +101,7 @@ func (wsConn *ServerWSConn) readLoop() {
 			continue
 		}
 
-		wsConn.pool.handleMessage(wsConn.chID, len(msg), msgType, connID, meta, payload)
+		wsConn.pool.handleMessage(wsConn.clientID, wsConn.chID, len(msg), msgType, connID, meta, payload)
 	}
 }
 
@@ -262,5 +262,5 @@ func (wsConn *ServerWSConn) close() {
 		close(writeChan)
 	}
 
-	wsConn.pool.cleanupChannel(wsConn.chID)
+	wsConn.pool.cleanupChannel(wsConn.clientID, wsConn.chID)
 }
