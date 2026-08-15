@@ -51,7 +51,7 @@ type Config struct {
 
 	// 背压控制
 	BackpressureLimitBytes int           // 全局队列背压阈值（字节），0 表示使用默认值 8MB
-	WriteQueueWaitTimeout  time.Duration // 写队列满时的等待超时，0 表示使用默认值 100ms
+	WriteQueueWaitTimeout  time.Duration // 写队列满时的等待超时，0 表示使用默认值 500ms
 
 	// SOCKS5 连接限制
 	MaxSOCKS5Connections int // SOCKS5 最大并发连接数 (0 表示无限制)
@@ -85,7 +85,7 @@ func DefaultConfig() *Config {
 		ReadBufferSize:          64 * 1024,
 		WriteBufferSize:         64 * 1024,
 		BackpressureLimitBytes:  DefaultBackpressureLimitBytes, // 默认 8MB
-		WriteQueueWaitTimeout:   100 * time.Millisecond,
+		WriteQueueWaitTimeout:   500 * time.Millisecond,        // 写队列满时等待窗口，避免瞬时打满即断连
 		UDPBlockedPorts:         []int{443},
 		MaxSOCKS5Connections:    1024, // 默认最大 1024 个并发连接
 		EnableHotPair:           false,
