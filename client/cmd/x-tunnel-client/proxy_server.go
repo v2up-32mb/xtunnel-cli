@@ -28,6 +28,9 @@ func startSocks5Listener(addr string, c *xtunnel.Client) error {
 	if len(udpBlockedPorts) > 0 {
 		opts = append(opts, xsharedsocks5.WithBlockedPorts(udpBlockedPorts))
 	}
+	if bypassMatcher != nil {
+		opts = append(opts, xsharedsocks5.WithBypassMatcher(bypassMatcher))
+	}
 	return xsharedsocks5.NewServer(cfg, c.ProxyDialer(), opts...).Start()
 }
 
@@ -46,6 +49,9 @@ func startHTTPListener(addr string, c *xtunnel.Client) error {
 	}
 	if maxSOCKS5Connections > 0 {
 		opts = append(opts, xsharedhttpproxy.WithMaxConns(maxSOCKS5Connections))
+	}
+	if bypassMatcher != nil {
+		opts = append(opts, xsharedhttpproxy.WithBypassMatcher(bypassMatcher))
 	}
 	return xsharedhttpproxy.NewServer(cfg, c.StreamDialer(), opts...).Start()
 }

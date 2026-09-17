@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
+	xsharedrouting "github.com/v2up-32mb/xshared/routing"
 )
 
 func main() {
@@ -21,6 +23,28 @@ func main() {
 	flag.Parse()
 
 	cfg := parseFlags()
+
+	// 构建路由绕过 matcher
+	if bypassPrivate || bypassGeoIPCN || bypassGeoSiteCN || strings.TrimSpace(bypassRules) != "" {
+		geoIPPathResolved := resolveGeoPath(geoIPPath, "geoip.dat")
+		geoSitePathResolved := resolveGeoPath(geoSitePath, "geosite.dat")
+		m, err := xsharedrouting.NewMatcherWithGeoFile(bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, bypassRules, geoIPPathResolved, geoSitePathResolved)
+		if err != nil {
+			log.Fatalf("[客户端] 构建路由绕过 matcher 失败: %v", err)
+		}
+		bypassMatcher = m
+		geoLoaded := ""
+		if geoIPPathResolved != "" {
+			geoLoaded += "geoip.dat=已加载 "
+		}
+		if geoSitePathResolved != "" {
+			geoLoaded += "geosite.dat=已加载 "
+		}
+		if geoLoaded == "" {
+			geoLoaded = "使用内置数据"
+		}
+		log.Printf("[客户端] 路由绕过已启用: private=%v geoip-cn=%v geosite-cn=%v rules=%q | %s", bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, bypassRules, strings.TrimSpace(geoLoaded))
+	}
 
 	c, err := xtunnel.NewClient(cfg)
 	if err != nil {
@@ -90,6 +114,12 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&fastRetryWindow, "fast-retry-window", 1*time.Second, "快速重试窗口")
 	fs.IntVar(&maxFastRetryConsecutive, "fast-retry-consecutive", 3, "连续进入快速重试的最大次数")
 	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 1024*1024, "全局队列背压阈值（字节），默认 1MB")
+	fs.BoolVar(&bypassPrivate, "bypass-private", false, "绕过私有/局域网地址（直连不走隧道）")
+	fs.BoolVar(&bypassGeoIPCN, "bypass-geoip-cn", false, "绕过中国大陆 IP（内置 GeoIP 规则，直连）")
+	fs.BoolVar(&bypassGeoSiteCN, "bypass-geosite-cn", false, "绕过中国大陆域名（内置 GeoSite 规则，直连）")
+	fs.StringVar(&bypassRules, "bypass-rules", "", "自定义绕过规则（多行，支持 domain:/full:/IP/CIDR）")
+	fs.StringVar(&geoIPPath, "geo-ip", "", "geoip.dat 路径（v2ray 格式，覆盖内置 CN 段；留空探测程序同目录）")
+	fs.StringVar(&geoSitePath, "geo-site", "", "geosite.dat 路径（v2ray 格式，覆盖内置 CN 域名；留空探测程序同目录）")
 }
 
 var (
@@ -115,7 +145,15 @@ var (
 	fastRetryWindow         time.Duration
 	maxFastRetryConsecutive int
 	backpressureLimitBytes  int
+	bypassPrivate           bool
+	bypassGeoIPCN           bool
+	bypassGeoSiteCN         bool
+	bypassRules             string
+	geoIPPath               string
+	geoSitePath             string
 )
+
+var bypassMatcher *xsharedrouting.Matcher
 
 func parseFlags() *xtunnel.Config {
 	if err := applyClientFileConfig(configFile, visitedFlags()); err != nil {
@@ -221,4 +259,23 @@ func parseListenAddrs() []string {
 	}
 
 	return listeners
+}
+
+// resolveGeoPath 解析 geoip/geosite dat 路径：显式 flag 优先；留空时探测可执行文件同目录；文件不存在返回空（库内静默回退内置）
+func resolveGeoPath(flagVal, defaultName string) string {
+	if p := strings.TrimSpace(flagVal); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		// flag 指定但文件不存在，回退为空
+		return ""
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		p := filepath.Join(dir, defaultName)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }

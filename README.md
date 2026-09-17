@@ -38,6 +38,8 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/generate_204
 -hotpair     启用 Hot Channel Pair 降低首帧延迟
 -dns         查询 ECH 公钥的 DNS 服务器（DoH 或 UDP）
 -max-socks5-conns  SOCKS5 最大并发连接数（0 无限制）
+--bypass-private/--bypass-geoip-cn/--bypass-geosite-cn  路由绕过开关，配合 --bypass-rules 自定义规则
+--geo-ip/--geo-site  指定 geoip.dat/geosite.dat 路径，留空自动探测可执行文件同目录
 ```
 
 完整参数见 `-h`；JSON 配置文件用 `-config`（CLI 参数优先）。IPv4/IPv6 策略

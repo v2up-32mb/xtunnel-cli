@@ -83,6 +83,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download route data files (Loyalsoldier snapshot)
+        run: |
+          mkdir -p route-data
+          curl -fsSL -o route-data/geoip.dat   "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+          curl -fsSL -o route-data/geosite.dat "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+          ls -la route-data
+
       - name: Detect prerelease
         run: |
           if echo "${{ steps.ref.outputs.tag_name }}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
@@ -100,6 +107,14 @@ jobs:
             echo ""
             echo "客户端：\`x-tunnel-client -l socks5://127.0.0.1:1080 -f wss://<server> -token <TOKEN>\`"
             echo "服务端：\`x-tunnel-server -l :443 -token <TOKEN>\`（自签证书自动生成）"
+            echo ""
+            echo "### 路由数据文件"
+            echo ""
+            echo "附件中的 \`geoip.dat\`/\`geosite.dat\`（Loyalsoldier 构建时快照）配合 \`--bypass-geoip-cn\`/\`--bypass-geosite-cn\` 使用："
+            echo "放到程序同目录自动加载，或用 \`--geo-ip\`/\`--geo-site\` 指定；不放则使用程序内置 CN 规则快照。"
+            echo "最新数据见 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases)。"
+            echo ""
+            echo "两支二进制均支持路由绕过：\`--bypass-private/--bypass-geoip-cn/--bypass-geosite-cn/--bypass-rules\`。"
             echo "完整参数见 \`-h\`（含 \`-ip\` 中转/\`-hotpair\`/\`-block\` UDP 拦截等）。"
           } > release-notes.md
 
@@ -113,4 +128,7 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ env.IS_PRERELEASE }}
-          files: dist/*
+          files: |
+            dist/*
+            route-data/geoip.dat
+            route-data/geosite.dat
