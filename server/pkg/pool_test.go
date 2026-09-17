@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 func newTestServerPool() *serverPool {
@@ -22,7 +22,7 @@ func newTestServerPool() *serverPool {
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  1024,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 }
 
@@ -30,9 +30,9 @@ func TestHandlePrebindRequestCleansUpState(t *testing.T) {
 	p := newTestServerPool()
 	connID := "prebind-test-1"
 	meta := []byte{0}
-	meta = append(meta, common.PrebindTarget...)
+	meta = append(meta, protocol.PrebindTarget...)
 
-	p.handleMessage("", 1, 10, common.MsgPrebindRequest, connID, meta, nil)
+	p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
 
 	p.mu.RLock()
 	_, exists := p.conns[connID]
@@ -45,10 +45,10 @@ func TestHandlePrebindRequestCleansUpState(t *testing.T) {
 func TestPrebindDoesNotLeakConns(t *testing.T) {
 	p := newTestServerPool()
 	meta := []byte{0}
-	meta = append(meta, common.PrebindTarget...)
+	meta = append(meta, protocol.PrebindTarget...)
 	for i := 0; i < 1000; i++ {
 		connID := fmt.Sprintf("prebind-%d", i)
-		p.handleMessage("", 1, 10, common.MsgPrebindRequest, connID, meta, nil)
+		p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
 	}
 	p.mu.RLock()
 	n := len(p.conns)
@@ -147,7 +147,7 @@ func TestAsyncWriteQueueFullDoesNotTriggerBackpressureState(t *testing.T) {
 		conns:             make(map[string]*ServerConnState),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  8,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 	wsConn := &ServerWSConn{
 		chID:      1,
@@ -160,7 +160,7 @@ func TestAsyncWriteQueueFullDoesNotTriggerBackpressureState(t *testing.T) {
 	if err := wsConn.asyncWrite(websocket.BinaryMessage, []byte("1234567")); err == nil {
 		t.Fatal("expected asyncWrite to fail when queue is full")
 	}
-	if got := common.BackpressureState(atomic.LoadInt32(&p.backpressureState)); got != common.BackpressureNormal {
+	if got := protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState)); got != protocol.BackpressureNormal {
 		t.Fatalf("expected backpressure state to stay normal after failed enqueue, got %v", got)
 	}
 	if got := atomic.LoadInt64(&p.globalQueueBytes); got != 4 {
@@ -175,7 +175,7 @@ func TestAsyncWriteHighWaterReturnsPromptly(t *testing.T) {
 		wsConns:           make([]*ServerWSConn, 1),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  8,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 	wsConn := &ServerWSConn{
 		chID:      1,
@@ -210,7 +210,7 @@ func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 		wsConns:           make([]*ServerWSConn, 1),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  64,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 	wsConn := &ServerWSConn{
 		chID:      1,
@@ -226,7 +226,7 @@ func TestBroadcastBackpressureSkipsSaturatedChannel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		p.broadcastBackpressure(common.BackpressurePause)
+		p.broadcastBackpressure(protocol.BackpressurePause)
 		close(done)
 	}()
 
@@ -256,7 +256,7 @@ func TestSendDownlinkBeforeSelectionOnlyTargetsOwningClient(t *testing.T) {
 	}
 	p.conns["tcp-conn"] = &ServerConnState{connID: "tcp-conn", clientID: "client-a"}
 
-	if err := p.sendDownlink("tcp-conn", common.MsgConnStatus, []byte{byte(common.StatusOK)}, nil); err != nil {
+	if err := p.sendDownlink("tcp-conn", protocol.MsgConnStatus, []byte{byte(protocol.StatusOK)}, nil); err != nil {
 		t.Fatalf("sendDownlink failed: %v", err)
 	}
 	if got := len(p.wsConns[0].writeChan); got != 1 {
@@ -356,7 +356,7 @@ func TestSendDownlinkAfterSelectionOnlyTargetsChosenChannel(t *testing.T) {
 	}
 	p.conns["tcp-conn"] = &ServerConnState{connID: "tcp-conn", clientID: "client-a", downlinkChID: 2}
 
-	if err := p.sendDownlink("tcp-conn", common.MsgConnStatus, []byte{byte(common.StatusOK)}, nil); err != nil {
+	if err := p.sendDownlink("tcp-conn", protocol.MsgConnStatus, []byte{byte(protocol.StatusOK)}, nil); err != nil {
 		t.Fatalf("sendDownlink failed: %v", err)
 	}
 	if got := len(p.wsConns[0].writeChan); got != 0 {
@@ -377,7 +377,7 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 		wsConns:           make([]*ServerWSConn, 2),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  1024,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 	p.wsConns[0] = &ServerWSConn{chID: 1, clientID: "client-a", pool: p}
 	p.wsConns[1] = &ServerWSConn{chID: 2, clientID: "client-a", pool: p}
@@ -385,7 +385,7 @@ func TestHandleUDPConnectFirstChannelWins(t *testing.T) {
 		"client-a": {1: p.wsConns[0], 2: p.wsConns[1]},
 	}
 
-	meta := append([]byte{byte(common.IPStrategyDefault)}, []byte("127.0.0.1:53")...)
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, []byte("127.0.0.1:53")...)
 	p.handleUDPConnect("client-a", 1, "udp-conn", meta)
 
 	p.mu.RLock()
@@ -465,8 +465,8 @@ func TestServerStatsCountSentBytesFromAsyncWrite(t *testing.T) {
 
 func TestServerStatsCountReceivedBytesFromHandleMessage(t *testing.T) {
 	p := &serverPool{conns: make(map[string]*ServerConnState)}
-	msg := common.EncodeMessage(common.MsgConnStatus, "cid", []byte{byte(common.StatusOK)}, nil)
-	msgType, connID, meta, payload, err := common.DecodeMessage(msg)
+	msg := protocol.EncodeMessage(protocol.MsgConnStatus, "cid", []byte{byte(protocol.StatusOK)}, nil)
+	msgType, connID, meta, payload, err := protocol.DecodeMessage(msg)
 	if err != nil {
 		t.Fatalf("decode message failed: %v", err)
 	}

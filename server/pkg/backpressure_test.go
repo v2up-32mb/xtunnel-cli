@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 func TestBackpressureStateTransitions(t *testing.T) {
@@ -19,13 +19,13 @@ func TestBackpressureStateTransitions(t *testing.T) {
 		t.Errorf("Expected globalQueueLimit %d, got %d", int64(cfg.ReadBufferSize)*8, pool.globalQueueLimit)
 	}
 
-	if atomic.LoadInt32(&pool.backpressureState) != int32(common.BackpressureNormal) {
+	if atomic.LoadInt32(&pool.backpressureState) != int32(protocol.BackpressureNormal) {
 		t.Errorf("Expected initial backpressure state to be Normal, got %d", atomic.LoadInt32(&pool.backpressureState))
 	}
 
 	// Test addQueueBytes below threshold (should stay normal)
 	pool.addQueueBytes(1000)
-	if atomic.LoadInt32(&pool.backpressureState) != int32(common.BackpressureNormal) {
+	if atomic.LoadInt32(&pool.backpressureState) != int32(protocol.BackpressureNormal) {
 		t.Errorf("Expected state to remain Normal after small add, got %d", atomic.LoadInt32(&pool.backpressureState))
 	}
 
@@ -44,10 +44,10 @@ func TestBackpressureStateTransitions(t *testing.T) {
 	// Test removeQueueBytes below 30% threshold (should return to normal)
 	// First, reset and add a small amount
 	atomic.StoreInt64(&pool.globalQueueBytes, 100)
-	atomic.StoreInt32(&pool.backpressureState, int32(common.BackpressureSlowDown))
+	atomic.StoreInt32(&pool.backpressureState, int32(protocol.BackpressureSlowDown))
 
 	pool.removeQueueBytes(50)
-	if atomic.LoadInt32(&pool.backpressureState) != int32(common.BackpressureNormal) {
+	if atomic.LoadInt32(&pool.backpressureState) != int32(protocol.BackpressureNormal) {
 		t.Errorf("Expected state to return to Normal after remove below 30%%, got %d", atomic.LoadInt32(&pool.backpressureState))
 	}
 

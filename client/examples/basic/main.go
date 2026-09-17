@@ -3,17 +3,19 @@ package main
 import (
 	"log"
 
-	"x-tunnel/client/pkg"
+	"github.com/v2up-32mb/xtunnel"
+	xsharedconfig "github.com/v2up-32mb/xshared/config"
+	xsharedsocks5 "github.com/v2up-32mb/xshared/socks5"
 )
 
 func main() {
-	cfg := &client.Config{
+	cfg := &xtunnel.Config{
 		ServerAddr:  "wss://server:8443",
 		Token:       "your_token",
 		Connections: 3,
 	}
 
-	c, err := client.NewClient(cfg)
+	c, err := xtunnel.NewClient(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -23,7 +25,10 @@ func main() {
 	}
 	defer c.Shutdown()
 
-	if err := c.ListenSOCKS5("127.0.0.1:1080"); err != nil {
+	if err := xsharedsocks5.NewServer(
+		&xsharedconfig.Config{ListenAddress: "127.0.0.1:1080"},
+		c.ProxyDialer(),
+	).Start(); err != nil {
 		log.Fatal(err)
 	}
 

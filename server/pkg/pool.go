@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 // maxAllowedChID 客户端可指定的通道 ID 上限。
@@ -68,7 +68,7 @@ func newServerPool(token string, config *Config) *serverPool {
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		globalQueueLimit:  limit,
-		backpressureState: int32(common.BackpressureNormal),
+		backpressureState: int32(protocol.BackpressureNormal),
 	}
 }
 
@@ -241,37 +241,37 @@ func (p *serverPool) addReceivedBytes(n int) {
 
 // handleMessage 处理消息
 // clientID 是消息来源 WebSocket 连接所属的客户端，用于在客户端各自的通道编号空间内路由。
-func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType common.MessageType, connID string, meta, payload []byte) {
+func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType protocol.MessageType, connID string, meta, payload []byte) {
 	p.addReceivedBytes(rawLen)
 	switch msgType {
-	case common.MsgTCPConnect:
+	case protocol.MsgTCPConnect:
 		p.handleTCPConnect(clientID, chID, connID, meta)
 
-	case common.MsgTCPData:
+	case protocol.MsgTCPData:
 		p.handleTCPData(chID, connID, payload)
 
-	case common.MsgSelectDownlink:
+	case protocol.MsgSelectDownlink:
 		p.handleSelectDownlink(clientID, chID, connID, meta)
 
-	case common.MsgTCPClose:
+	case protocol.MsgTCPClose:
 		p.handleTCPClose(chID, connID)
 
-	case common.MsgPrebindRequest:
+	case protocol.MsgPrebindRequest:
 		p.handlePrebindRequest(clientID, chID, connID, meta)
 
-	case common.MsgUDPConnect:
+	case protocol.MsgUDPConnect:
 		p.handleUDPConnect(clientID, chID, connID, meta)
 
-	case common.MsgUDPData:
+	case protocol.MsgUDPData:
 		p.handleUDPData(chID, connID, meta, payload)
 
-	case common.MsgUDPClose:
+	case protocol.MsgUDPClose:
 		p.handleUDPClose(chID, connID)
 	}
 }
 
 // sendDownlink 发送下行数据
-func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, meta, payload []byte) error {
+func (p *serverPool) sendDownlink(connID string, msgType protocol.MessageType, meta, payload []byte) error {
 	p.mu.RLock()
 	st := p.conns[connID]
 	p.mu.RUnlock()
@@ -287,11 +287,11 @@ func (p *serverPool) sendDownlink(connID string, msgType common.MessageType, met
 
 	if downlink > 0 {
 		// 已选择下行通道:单播（按该连接所属客户端定位通道）
-		return p.sendToChannel(clientID, downlink, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
+		return p.sendToChannel(clientID, downlink, websocket.BinaryMessage, protocol.EncodeMessage(msgType, connID, meta, payload))
 	}
 
 	// 未选择:只广播给同一客户端的活跃通道
-	return p.broadcastWriteToClient(clientID, websocket.BinaryMessage, common.EncodeMessage(msgType, connID, meta, payload))
+	return p.broadcastWriteToClient(clientID, websocket.BinaryMessage, protocol.EncodeMessage(msgType, connID, meta, payload))
 }
 
 // broadcastWrite 广播写入所有通道
@@ -333,7 +333,7 @@ func (p *serverPool) sendToChannel(clientID string, chID int, msgType int, data 
 	p.mu.RUnlock()
 
 	if wsConn == nil || wsConn.closed {
-		return fmt.Errorf("客户端 %s 通道 %d 不可用", common.ShortID(clientID), chID)
+		return fmt.Errorf("客户端 %s 通道 %d 不可用", protocol.ShortID(clientID), chID)
 	}
 
 	_ = wsConn.asyncWrite(msgType, data)
@@ -445,7 +445,7 @@ func (p *serverPool) unregisterConn(connID string) {
 	}
 
 	log.Printf("[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
-		clientAddr, target, u, d, common.ShortID(connID))
+		clientAddr, target, u, d, protocol.ShortID(connID))
 }
 
 // Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。
@@ -508,20 +508,20 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 	}
 
 	if newSize > limit*95/100 {
-		if common.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != common.BackpressurePause {
-			atomic.StoreInt32(&p.backpressureState, int32(common.BackpressurePause))
-			p.broadcastBackpressure(common.BackpressurePause)
+		if protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != protocol.BackpressurePause {
+			atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressurePause))
+			p.broadcastBackpressure(protocol.BackpressurePause)
 			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		}
 		return
 	}
 
 	if newSize > limit*8/10 {
-		currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
-		if currentState == common.BackpressureNormal {
+		currentState := protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+		if currentState == protocol.BackpressureNormal {
 			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
-				atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
-				p.broadcastBackpressure(common.BackpressureSlowDown)
+				atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
+				p.broadcastBackpressure(protocol.BackpressureSlowDown)
 				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 				go func() {
 					time.Sleep(1 * time.Second)
@@ -545,7 +545,7 @@ func (p *serverPool) removeQueueBytes(size int) {
 		return
 	}
 
-	currentState := common.BackpressureState(atomic.LoadInt32(&p.backpressureState))
+	currentState := protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState))
 
 	// 分级恢复机制：
 	// 暂停(95%) -> 减速(90%) -> 正常(70%)
@@ -553,33 +553,33 @@ func (p *serverPool) removeQueueBytes(size int) {
 	// 恢复阈值略低于触发阈值，避免频繁切换状态
 
 	// 直接从暂停恢复到正常（极低水位：30%，用于队列快速清空的情况）
-	if currentState == common.BackpressurePause && newSize < limit*3/10 {
-		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
-		p.broadcastBackpressure(common.BackpressureNormal)
+	if currentState == protocol.BackpressurePause && newSize < limit*3/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
+		p.broadcastBackpressure(protocol.BackpressureNormal)
 		log.Printf("[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 
 	// 从暂停恢复到减速（90%，略低于暂停触发阈值95%）
-	if currentState == common.BackpressurePause && newSize < limit*9/10 {
-		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureSlowDown))
-		p.broadcastBackpressure(common.BackpressureSlowDown)
+	if currentState == protocol.BackpressurePause && newSize < limit*9/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
+		p.broadcastBackpressure(protocol.BackpressureSlowDown)
 		log.Printf("[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 
 	// 从减速恢复到正常（70%，略低于减速触发阈值80%）
-	if currentState == common.BackpressureSlowDown && newSize < limit*7/10 {
-		atomic.StoreInt32(&p.backpressureState, int32(common.BackpressureNormal))
-		p.broadcastBackpressure(common.BackpressureNormal)
+	if currentState == protocol.BackpressureSlowDown && newSize < limit*7/10 {
+		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
+		p.broadcastBackpressure(protocol.BackpressureNormal)
 		log.Printf("[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 }
 
 // broadcastBackpressure 广播背压状态到所有通道
-func (p *serverPool) broadcastBackpressure(state common.BackpressureState) {
+func (p *serverPool) broadcastBackpressure(state protocol.BackpressureState) {
 	meta := []byte{byte(state)}
-	msg := common.EncodeMessage(common.MsgBackpressure, "", meta, nil)
+	msg := protocol.EncodeMessage(protocol.MsgBackpressure, "", meta, nil)
 	_ = p.broadcastWrite(websocket.BinaryMessage, msg)
 }

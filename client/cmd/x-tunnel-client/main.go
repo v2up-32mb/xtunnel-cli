@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"x-tunnel/client/pkg"
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 func main() {
@@ -22,7 +22,7 @@ func main() {
 
 	cfg := parseFlags()
 
-	c, err := client.NewClient(cfg)
+	c, err := xtunnel.NewClient(cfg)
 	if err != nil {
 		log.Fatalf("[客户端] 创建客户端失败: %v", err)
 	}
@@ -42,9 +42,9 @@ func main() {
 			var err error
 			switch {
 			case strings.HasPrefix(a, "socks5://"):
-				err = c.ListenSOCKS5(a)
+				err = startSocks5Listener(a, c)
 			case strings.HasPrefix(a, "http://"):
-				err = c.ListenHTTP(a)
+				err = startHTTPListener(a, c)
 			default:
 				err = fmt.Errorf("不支持的监听协议")
 			}
@@ -93,6 +93,7 @@ func registerFlags(fs *flag.FlagSet) {
 }
 
 var (
+	udpBlockedPorts         []int
 	configFile              string
 	listenAddr              string
 	forwardAddr             string
@@ -116,7 +117,7 @@ var (
 	backpressureLimitBytes  int
 )
 
-func parseFlags() *client.Config {
+func parseFlags() *xtunnel.Config {
 	if err := applyClientFileConfig(configFile, visitedFlags()); err != nil {
 		log.Fatalf("[客户端] 读取配置文件失败: %v", err)
 	}
@@ -126,7 +127,7 @@ func parseFlags() *client.Config {
 	}
 
 	// 解析 UDP 拦截端口
-	var udpBlockedPorts []int
+	udpBlockedPorts = nil
 	if udpBlockPortsStr != "" {
 		for _, p := range strings.Split(udpBlockPortsStr, ",") {
 			pp := strings.TrimSpace(p)
@@ -152,10 +153,10 @@ func parseFlags() *client.Config {
 	}
 
 	// 解析 IP 策略
-	ipStrategy := common.IPStrategyDefault
+	ipStrategy := protocol.IPStrategyDefault
 	if ips != "" {
 		var err error
-		ipStrategy, err = common.ParseIPStrategy(ips)
+		ipStrategy, err = protocol.ParseIPStrategy(ips)
 		if err != nil {
 			log.Printf("[客户端] IP 策略解析失败: %v,使用默认策略", err)
 		} else {
@@ -173,7 +174,7 @@ func parseFlags() *client.Config {
 		enableECH = false
 	}
 
-	cfg := client.DefaultConfig()
+	cfg := xtunnel.DefaultConfig()
 	cfg.ServerAddr = forwardAddr
 	cfg.Token = token
 	cfg.Connections = connectionNum

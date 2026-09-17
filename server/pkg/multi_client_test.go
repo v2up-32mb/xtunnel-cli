@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 // dialServerWS 以指定 clientID/chID 与服务端建立 WebSocket 连接
@@ -84,8 +84,8 @@ func TestMultipleClientsCanShareSameChID(t *testing.T) {
 	}
 
 	// 客户端 B 发起预绑定，应只收到自己的 MsgSelectUplink 广播，A 不应收到
-	meta := append([]byte{byte(common.IPStrategyDefault)}, common.PrebindTarget...)
-	msg := common.EncodeMessage(common.MsgPrebindRequest, "regress-conn", meta, nil)
+	meta := append([]byte{byte(protocol.IPStrategyDefault)}, protocol.PrebindTarget...)
+	msg := protocol.EncodeMessage(protocol.MsgPrebindRequest, "regress-conn", meta, nil)
 	if err := connB.WriteMessage(websocket.BinaryMessage, msg); err != nil {
 		t.Fatalf("client-b write prebind failed: %v", err)
 	}
@@ -98,11 +98,11 @@ func TestMultipleClientsCanShareSameChID(t *testing.T) {
 	if mt != websocket.BinaryMessage {
 		t.Fatalf("client-b unexpected message type %d", mt)
 	}
-	tp, _, _, _, err := common.DecodeMessage(data)
+	tp, _, _, _, err := protocol.DecodeMessage(data)
 	if err != nil {
 		t.Fatalf("client-b decode failed: %v", err)
 	}
-	if tp != common.MsgSelectUplink {
+	if tp != protocol.MsgSelectUplink {
 		t.Fatalf("client-b expected MsgSelectUplink, got %v", tp)
 	}
 

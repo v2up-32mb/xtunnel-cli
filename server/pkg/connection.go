@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"x-tunnel/common"
+	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
 // writeTask 写入任务
@@ -28,7 +28,7 @@ type ServerConnState struct {
 	targetUDP    *net.UDPConn
 	uplinkChID   int
 	downlinkChID int
-	ipStrategy   common.IPStrategy
+	ipStrategy   protocol.IPStrategy
 	isUDP        bool
 	clientAddr   string
 	connected    bool
@@ -82,7 +82,7 @@ func (wsConn *ServerWSConn) readLoop() {
 	for {
 		mt, msg, err := wsConn.ws.ReadMessage()
 		if err != nil {
-			if !common.IsNormalCloseError(err) {
+			if !protocol.IsNormalCloseError(err) {
 				log.Printf("[服务端] 通道 %d 读取消息失败: %v", wsConn.chID, err)
 			} else {
 				log.Printf("[服务端] 通道 %d 正常关闭: %v", wsConn.chID, err)
@@ -96,7 +96,7 @@ func (wsConn *ServerWSConn) readLoop() {
 			continue
 		}
 
-		msgType, connID, meta, payload, err := common.DecodeMessage(msg)
+		msgType, connID, meta, payload, err := protocol.DecodeMessage(msg)
 		if err != nil {
 			continue
 		}
@@ -234,7 +234,7 @@ func (wsConn *ServerWSConn) notifyChannelReset() error {
 	}
 	meta := make([]byte, 4)
 	binary.BigEndian.PutUint32(meta, uint32(wsConn.chID))
-	data := common.EncodeMessage(common.MsgChannelReset, "", meta, nil)
+	data := protocol.EncodeMessage(protocol.MsgChannelReset, "", meta, nil)
 	_ = wsConn.ws.SetWriteDeadline(time.Now().Add(wsConn.pool.config.WriteTimeout))
 	err := wsConn.ws.WriteMessage(websocket.BinaryMessage, data)
 	_ = wsConn.ws.SetWriteDeadline(time.Time{})
