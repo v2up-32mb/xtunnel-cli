@@ -1,0 +1,113 @@
+name: Release
+
+# tag 触发：多平台构建 client/server 二进制并发版
+# workflow_dispatch：可为已存在的 tag 补发 release（tag_name 输入）
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '为已存在的 tag 补发 release（如 v1.3.0）'
+        required: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goarch: arm64, goos: darwin }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag_name }}" ]]; then
+            echo "checkout_ref=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "checkout_ref=${{ github.ref }}" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.checkout_ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          EXT=""
+          [[ "${{ matrix.goos }}" == "windows" ]] && EXT=".exe"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/x-tunnel-client-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}" ./client/cmd/x-tunnel-client
+          go build -trimpath -ldflags "-s -w" -o "dist/x-tunnel-server-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}" ./server/cmd/x-tunnel-server
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtunnel-cli-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: ref
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag_name }}" ]]; then
+            echo "tag_name=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Detect prerelease
+        run: |
+          if echo "${{ steps.ref.outputs.tag_name }}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Generate release notes
+        run: |
+          {
+            echo "## X-Tunnel CLI \`${{ steps.ref.outputs.tag_name }}\`"
+            echo ""
+            echo "纯静态二进制（\`CGO_ENABLED=0\`），每平台含 \`x-tunnel-client\` 与 \`x-tunnel-server\` 两支。"
+            echo ""
+            echo "客户端：\`x-tunnel-client -l socks5://127.0.0.1:1080 -f wss://<server> -token <TOKEN>\`"
+            echo "服务端：\`x-tunnel-server -l :443 -token <TOKEN>\`（自签证书自动生成）"
+            echo "完整参数见 \`-h\`（含 \`-ip\` 中转/\`-hotpair\`/\`-block\` UDP 拦截等）。"
+          } > release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag_name: ${{ steps.ref.outputs.tag_name }}
+          name: "X-Tunnel CLI ${{ steps.ref.outputs.tag_name }}"
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ env.IS_PRERELEASE }}
+          files: dist/*
