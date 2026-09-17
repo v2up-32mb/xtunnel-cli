@@ -42,14 +42,14 @@ const pendingDataMaxSize = 1024 * 1024 // 1MB
 
 // ServerWSConn WebSocket 连接
 type ServerWSConn struct {
-	ws         *websocket.Conn
-	chID       int
-	clientID   string
-	remoteAddr string
-	pool       *serverPool
-	mu         sync.Mutex
-	closed     bool
-	writeChan  chan writeTask
+	ws             *websocket.Conn
+	chID           int
+	clientID       string
+	remoteAddr     string
+	pool           *serverPool
+	mu             sync.Mutex
+	closed         bool
+	writeChan      chan writeTask
 	queueFullCount int
 	lastQueueFull  time.Time
 	lastReset      time.Time // 上次触发 MsgChannelReset 的时间，用于冷却
@@ -63,7 +63,11 @@ func (wsConn *ServerWSConn) start() {
 // readLoop 读取循环
 func (wsConn *ServerWSConn) readLoop() {
 	defer func() {
-		if !wsConn.closed {
+		// closed 受 mu 保护，必须持锁读取（-race 检出点）
+		wsConn.mu.Lock()
+		alreadyClosed := wsConn.closed
+		wsConn.mu.Unlock()
+		if !alreadyClosed {
 			wsConn.close()
 		}
 	}()
@@ -110,28 +114,34 @@ func (wsConn *ServerWSConn) writeLoop() {
 	ticker := time.NewTicker(wsConn.pool.config.PingInterval)
 	defer ticker.Stop()
 
+	// 通道快照：close() 会将字段置 nil 并 close 通道，写循环统一使用快照避免字段竞态
+	wsConn.mu.Lock()
+	ch := wsConn.writeChan
+	wsConn.mu.Unlock()
+	if ch == nil {
+		return
+	}
+
 	// 退出时回收队列字节
 	defer func() {
-		if wsConn.writeChan != nil {
-			for {
-				select {
-				case task, ok := <-wsConn.writeChan:
-					if !ok {
-						return
-					}
-					if task.size > 0 {
-						wsConn.pool.removeQueueBytes(task.size)
-					}
-				default:
+		for {
+			select {
+			case task, ok := <-ch:
+				if !ok {
 					return
 				}
+				if task.size > 0 {
+					wsConn.pool.removeQueueBytes(task.size)
+				}
+			default:
+				return
 			}
 		}
 	}()
 
 	for {
 		select {
-		case task, ok := <-wsConn.writeChan:
+		case task, ok := <-ch:
 			if !ok {
 				return
 			}
@@ -172,7 +182,7 @@ func (wsConn *ServerWSConn) asyncWrite(msgType int, data []byte) error {
 		wsConn.mu.Unlock()
 		wsConn.pool.updateBackpressureState(newSize)
 		return nil
-default:
+	default:
 		wsConn.pool.rollbackQueueBytes(size)
 
 		now := time.Now()
