@@ -32,6 +32,8 @@ type ServerReverseConn struct {
 	result  chan struct{}
 	ok      bool
 	errMsg  string
+
+	downlinkSent int32 // atomic：兜底修复时 SelectDownlink 只补发一次
 }
 
 func newServerReverseConn(connID, clientID, target string) *ServerReverseConn {
@@ -71,7 +73,17 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 	if d.pool.countActiveChannelsForClient(d.clientID) == 0 {
 		return nil, fmt.Errorf("无可用客户端通道")
 	}
+	// Hot Pair 路径：预热 Pair 就绪则单播直达（镜像正向 RegisterAndBroadcastTCP）。
+	// connID 复用 prebind connID 作为关联凭证——客户端凭它把 warm 状态提升为真实连接，
+	// 收发通道在预热期已协商完毕，拨号期零选路消息。
+	var pair *ReverseHotPair
+	if d.pool.reversePairWarmer != nil {
+		pair = d.pool.reversePairWarmer.AcquirePair(d.clientID)
+	}
 	connID := uuid.NewString()
+	if pair != nil {
+		connID = pair.ID
+	}
 	rc := newServerReverseConn(connID, d.clientID, target)
 
 	d.pool.revMu.Lock()
@@ -83,11 +95,6 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 	copy(meta[1:], []byte(target))
 	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)
 
-	// Hot Pair 路径：预热 Pair 就绪则单播直达，免广播竞争（镜像正向 RegisterAndBroadcastTCP）
-	var pair *ReverseHotPair
-	if d.pool.reversePairWarmer != nil {
-		pair = d.pool.reversePairWarmer.AcquirePair(d.clientID)
-	}
 	if pair != nil {
 		atomic.StoreInt32(&rc.sendCh, int32(pair.P1))
 		atomic.StoreInt32(&rc.recvCh, int32(pair.P2))
@@ -96,10 +103,6 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 			log.Printf("[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", pair.P1, err)
 			d.pool.reversePairWarmer.InvalidateChannel(pair.P1)
 			pair = nil
-		} else {
-			downMeta := make([]byte, 4)
-			binary.BigEndian.PutUint32(downMeta, uint32(pair.P2))
-			_ = d.pool.sendToChannel(d.clientID, pair.P1, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
 		}
 	}
 	if pair == nil {
@@ -155,7 +158,10 @@ func (p *serverPool) reverseUpstreamPump(rc *ServerReverseConn) {
 			data := make([]byte, n)
 			copy(data, buf[:n])
 			if sendCh > 0 {
-				_ = p.sendToChannel(rc.ownerClientID, sendCh, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, data))
+				if err := p.sendToChannel(rc.ownerClientID, sendCh, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, data)); err != nil {
+					// 单播通道失效：回退广播，避免数据静默丢失
+					_ = p.broadcastWriteToClient(rc.ownerClientID, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, data))
+				}
 			} else {
 				_ = p.broadcastWriteToClient(rc.ownerClientID, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPData, connID, nil, data))
 			}
@@ -187,7 +193,18 @@ func (p *serverPool) handleReverseMessage(clientID string, chID int, msgType pro
 			return
 		}
 		if atomic.LoadInt32(&rc.sendCh) != 0 {
-			return // 已有通道获胜
+			// 兜底修复：客户端丢失 warm 状态（TTL 到期/广播副本）后重新选路。
+			// 采用客户端的收包通道（meta）作为服务端发包通道，并补发一次
+			// MsgSelectDownlink 让客户端拿到服务端收包通道（幂等）。
+			clientRecv := int32(binary.BigEndian.Uint32(meta[:4]))
+			atomic.StoreInt32(&rc.sendCh, clientRecv)
+			if atomic.CompareAndSwapInt32(&rc.downlinkSent, 0, 1) {
+				downMeta := make([]byte, 4)
+				binary.BigEndian.PutUint32(downMeta, uint32(atomic.LoadInt32(&rc.recvCh)))
+				_ = p.sendToChannel(clientID, int(clientRecv), websocket.BinaryMessage,
+					protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
+			}
+			return
 		}
 		send := int32(binary.BigEndian.Uint32(meta[:4]))
 		if atomic.CompareAndSwapInt32(&rc.sendCh, 0, send) {

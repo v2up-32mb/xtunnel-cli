@@ -215,6 +215,18 @@ func (w *ReversePairWarmer) HandlePrebindUplink(clientID string, chID int, connI
 	pair.P1 = int(binary.BigEndian.Uint32(meta[:4]))
 	pair.P2 = chID
 	delete(w.pending, connID)
+
+	// 预热收尾：把服务端选定的收包通道 P2 经 P1 推给客户端（客户端补全 sendCh 并
+	// 保留 warm 状态）。至此上下行竞争全部完成，拨号期零选路消息。
+	downMeta := make([]byte, 4)
+	binary.BigEndian.PutUint32(downMeta, uint32(pair.P2))
+	if err := w.pool.sendToChannel(clientID, pair.P1, websocket.BinaryMessage,
+		protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil)); err != nil {
+		// P1 已失效：不入就绪队列，等待下轮重建
+		log.Printf("[ReversePairWarmer] Pair 通道 %d 推送失败，废弃 (P1:%d P2:%d)", pair.P1, pair.P1, pair.P2)
+		w.mu.Unlock()
+		return
+	}
 	w.ready[clientID] = append(w.ready[clientID], pair)
 	w.mu.Unlock()
 	log.Printf("[ReversePairWarmer] Pair 构建完成 (P1:%d P2:%d)，客户端 %s", pair.P1, pair.P2, protocol.ShortID(clientID))

@@ -98,6 +98,11 @@ func TestReversePairWarmerBuildAndAcquire(t *testing.T) {
 	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, gotID, be32v(1), nil)); err != nil {
 		t.Fatalf("write MsgSelectUplink: %v", err)
 	}
+	// 预热收尾：服务端经 P1 推送 MsgSelectDownlink([P2])，至此上下行选路全部完成
+	mtypeD, idD, metaD, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtypeD != protocol.MsgSelectDownlink || idD != gotID || binary.BigEndian.Uint32(metaD) != 1 {
+		t.Fatalf("expected warmup MsgSelectDownlink P2=1, got type=%d id=%s meta=%v", mtypeD, idD, metaD)
+	}
 
 	// Pair 就绪：P1=1（meta），P2=1（到达通道）
 	deadline := time.Now().Add(2 * time.Second)
@@ -127,6 +132,7 @@ func TestReversePairWarmerBuildAndAcquire(t *testing.T) {
 	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, gotID, be32v(1), nil)); err != nil {
 		t.Fatalf("write MsgSelectUplink: %v", err)
 	}
+	readFrameType(t, conn1, 3*time.Second) // 消费预热收尾 MsgSelectDownlink
 	deadline = time.Now().Add(2 * time.Second)
 	for {
 		p.reversePairWarmer.mu.Lock()
@@ -217,6 +223,10 @@ func TestReverseDialStreamHotPairUnicast(t *testing.T) {
 	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, gotID, be32v(1), nil)); err != nil {
 		t.Fatalf("write MsgSelectUplink: %v", err)
 	}
+	mtypeP, idP, metaP, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtypeP != protocol.MsgSelectDownlink || idP != gotID || binary.BigEndian.Uint32(metaP) != 1 {
+		t.Fatalf("expected warmup MsgSelectDownlink P2=1, got type=%d id=%s meta=%v", mtypeP, idP, metaP)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if pair := p.reversePairWarmer.AcquirePair("client-a"); pair != nil {
@@ -245,14 +255,10 @@ func TestReverseDialStreamHotPairUnicast(t *testing.T) {
 		streamCh <- conn
 	}()
 
-	// 通道 1 收到单播 MsgTCPConnect + MsgSelectDownlink
+	// 通道 1 收到单播 MsgTCPConnect（复用 prebind connID；拨号期零选路消息）
 	mtype1, id1, _, _ := readFrameType(t, conn1, 3*time.Second)
-	if mtype1 != protocol.MsgTCPConnect || isReversePrebindConnID(id1) {
-		t.Fatalf("expected MsgTCPConnect on pair channel, got type=%d id=%s", mtype1, id1)
-	}
-	mtype2, id2, meta2, _ := readFrameType(t, conn1, 3*time.Second)
-	if mtype2 != protocol.MsgSelectDownlink || id2 != id1 || binary.BigEndian.Uint32(meta2) != 1 {
-		t.Fatalf("expected MsgSelectDownlink P2=1, got type=%d id=%s meta=%v", mtype2, id2, meta2)
+	if mtype1 != protocol.MsgTCPConnect || !isReversePrebindConnID(id1) || id1 != gotID {
+		t.Fatalf("expected MsgTCPConnect with pair connID, got type=%d id=%s (pair=%s)", mtype1, id1, gotID)
 	}
 
 	// 通道 2 在 PrebindRequest 之后不应收到任何消息（单播而非广播）
@@ -353,4 +359,82 @@ func TestReverseDialStreamFallback(t *testing.T) {
 		t.Fatal("DialStream timeout")
 	}
 	_ = accepted
+}
+
+// TestReversePairWarmerFallbackRepair 客户端 warm 状态丢失后重新选路：
+// 服务端采用客户端的收包通道作为发包通道，并幂等补发 MsgSelectDownlink 修复。
+func TestReversePairWarmerFallbackRepair(t *testing.T) {
+	p, _, conn1, _, cleanup := newWarmTestServer(t)
+	defer cleanup()
+
+	p.reverseManager.HandleReverseListen("client-a", 1, "lid-1", []byte("socks5://127.0.0.1:0"))
+	readFrameType(t, conn1, 3*time.Second) // 消费监听回执
+	p.handleMessage("client-a", 1, 4, protocol.MsgReverseHotPair, "", nil, nil)
+
+	p.reversePairWarmer.tryBuildPairs()
+	mtype, gotID, _, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtype != protocol.MsgPrebindRequest {
+		t.Fatalf("expected MsgPrebindRequest, got %d", mtype)
+	}
+	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, gotID, be32v(1), nil)); err != nil {
+		t.Fatalf("write MsgSelectUplink: %v", err)
+	}
+	mtypeP, _, metaP, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtypeP != protocol.MsgSelectDownlink || binary.BigEndian.Uint32(metaP) != 1 {
+		t.Fatalf("expected warmup MsgSelectDownlink, got type=%d", mtypeP)
+	}
+	// 等待 Pair 入队
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if pair := p.reversePairWarmer.AcquirePair("client-a"); pair != nil {
+			p.reversePairWarmer.mu.Lock()
+			p.reversePairWarmer.ready["client-a"] = append(p.reversePairWarmer.ready["client-a"], pair)
+			p.reversePairWarmer.mu.Unlock()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pair never ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	dialer := &reverseDialer{pool: p, clientID: "client-a"}
+	streamCh := make(chan net.Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := dialer.DialStream(context.Background(), "example.test:443")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		streamCh <- conn
+	}()
+
+	// 拨号期：只有 MsgTCPConnect（复用 prebind connID），零选路消息
+	mtype1, id1, _, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtype1 != protocol.MsgTCPConnect || !isReversePrebindConnID(id1) || id1 != gotID {
+		t.Fatalf("expected MsgTCPConnect with pair connID, got type=%d id=%s", mtype1, id1)
+	}
+
+	// 模拟客户端丢失 warm 状态：回退广播路径行为——回 MsgSelectUplink([1])
+	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectUplink, id1, be32v(1), nil)); err != nil {
+		t.Fatalf("write late MsgSelectUplink: %v", err)
+	}
+	// 服务端应补发一次 MsgSelectDownlink([P2]=1)（幂等修复，且不产生第二份）
+	mtypeR, idR, metaR, _ := readFrameType(t, conn1, 3*time.Second)
+	if mtypeR != protocol.MsgSelectDownlink || idR != id1 || binary.BigEndian.Uint32(metaR) != 1 {
+		t.Fatalf("expected repair MsgSelectDownlink, got type=%d id=%s meta=%v", mtypeR, idR, metaR)
+	}
+
+	// 拨号成功收尾
+	if err := conn1.WriteMessage(websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgConnStatus, id1, []byte{byte(protocol.StatusOK)}, nil)); err != nil {
+		t.Fatalf("write ConnStatus: %v", err)
+	}
+	select {
+	case <-streamCh:
+	case err := <-errCh:
+		t.Fatalf("DialStream failed: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("DialStream timeout")
+	}
 }
