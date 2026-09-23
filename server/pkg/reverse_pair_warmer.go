@@ -26,36 +26,88 @@ type ReverseHotPair struct {
 
 func (p *ReverseHotPair) IsReady() bool { return atomic.LoadInt32(&p.ready) == 1 }
 
-// ReversePairWarmer 反向模式预热器（-hotpair 启用时创建）。
-// 镜像正向 clientPool 的 PairWarmer：后台循环为每个已注册反向监听的客户端
-// 预构建 {P1,P2} 通道对，使代理请求到达时单播直达、无需重走广播竞争。
+// 反向预热参数为服务端内部常量：是否预热由客户端 -hotpair 信号决定，
+// 预热多少/多久刷一次属服务端实现细节，不暴露配置。
+const (
+	reverseHotPairCount    = 1                // 每客户端预热 Pair 数
+	reverseHotPairInterval = 30 * time.Second // 预热刷新间隔
+)
+
+// ReversePairWarmer 反向模式预热器。
+// 镜像正向 clientPool 的 PairWarmer：后台循环为已授权（收到 MsgReverseHotPair）
+// 且已注册反向监听的客户端预构建 {P1,P2} 通道对，使代理请求到达时单播直达、
+// 无需重走广播竞争。开关由客户端启动参数决定，服务端零配置。
 type ReversePairWarmer struct {
 	pool     *serverPool
 	count    int
 	interval time.Duration
 
 	mu       sync.Mutex
+	enabled  map[string]struct{}          // 已授权预热的 clientID（客户端 MsgReverseHotPair）
 	pending  map[string]*ReverseHotPair   // connID → 构建中的 pair
 	ready    map[string][]*ReverseHotPair // clientID → 就绪 pair 队列
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
-func NewReversePairWarmer(pool *serverPool, count int, interval time.Duration) *ReversePairWarmer {
-	if count <= 0 {
-		count = 1
-	}
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
+func NewReversePairWarmer(pool *serverPool) *ReversePairWarmer {
 	return &ReversePairWarmer{
 		pool:     pool,
-		count:    count,
-		interval: interval,
+		count:    reverseHotPairCount,
+		interval: reverseHotPairInterval,
+		enabled:  make(map[string]struct{}),
 		pending:  make(map[string]*ReverseHotPair),
 		ready:    make(map[string][]*ReverseHotPair),
 		stopCh:   make(chan struct{}),
 	}
+}
+
+// EnableClient 客户端授权预热（MsgReverseHotPair，幂等），并立即尝试补足
+func (w *ReversePairWarmer) EnableClient(clientID string) {
+	w.mu.Lock()
+	w.enabled[clientID] = struct{}{}
+	w.mu.Unlock()
+	w.Kick()
+}
+
+// DisableClient 客户端掉线：撤销授权（重连后需重新授权）
+func (w *ReversePairWarmer) DisableClient(clientID string) {
+	w.mu.Lock()
+	delete(w.enabled, clientID)
+	w.mu.Unlock()
+}
+
+// Enabled 是否已授权（测试用）
+func (w *ReversePairWarmer) Enabled(clientID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.enabled[clientID]
+	return ok
+}
+
+// enabledClientsWithListeners 返回已授权且持有反向监听器的客户端列表
+func (w *ReversePairWarmer) enabledClientsWithListeners() []string {
+	w.mu.Lock()
+	ids := make([]string, 0, len(w.enabled))
+	for id := range w.enabled {
+		ids = append(ids, id)
+	}
+	w.mu.Unlock()
+
+	if w.pool == nil || w.pool.reverseManager == nil {
+		return nil
+	}
+	hasListener := make(map[string]struct{})
+	for _, id := range w.pool.reverseManager.ClientIDs() {
+		hasListener[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := hasListener[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // Start 启动后台预热循环
@@ -87,12 +139,12 @@ func (w *ReversePairWarmer) run() {
 	}
 }
 
-// tryBuildPairs 为每个持有反向监听器的客户端补足预热 Pair
+// tryBuildPairs 为每个已授权且持有反向监听器的客户端补足预热 Pair
 func (w *ReversePairWarmer) tryBuildPairs() {
 	if w.pool == nil || w.pool.reverseManager == nil {
 		return
 	}
-	for _, clientID := range w.pool.reverseManager.ClientIDs() {
+	for _, clientID := range w.enabledClientsWithListeners() {
 		if w.pool.countActiveChannelsForClient(clientID) == 0 {
 			continue
 		}

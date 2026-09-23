@@ -83,9 +83,8 @@ func newServerPool(token string, config *Config) *serverPool {
 	}
 	p.reverseManager = NewReverseListenerManager(config.MaxReverseListeners)
 	p.reverseManager.pool = p
-	if config.EnableHotPair {
-		p.reversePairWarmer = NewReversePairWarmer(p, config.HotPairCount, config.HotPairRefreshInterval)
-	}
+	// 反向预热器常驻：是否预热由客户端 -hotpair 信号决定（MsgReverseHotPair），服务端零配置
+	p.reversePairWarmer = NewReversePairWarmer(p)
 	return p
 }
 
@@ -304,6 +303,12 @@ func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgTyp
 	case protocol.MsgReverseListen:
 		p.reverseManager.HandleReverseListen(clientID, chID, connID, meta)
 		return
+	case protocol.MsgReverseHotPair:
+		// 客户端 -hotpair 授权：为本客户端启用反向 Pair 预热（幂等）
+		if p.reversePairWarmer != nil {
+			p.reversePairWarmer.EnableClient(clientID)
+		}
+		return
 	case protocol.MsgTCPConnect:
 		p.handleTCPConnect(clientID, chID, connID, meta)
 
@@ -454,6 +459,7 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 
 	if p.reversePairWarmer != nil {
 		if clientGone {
+			p.reversePairWarmer.DisableClient(clientID)
 			p.reversePairWarmer.InvalidateClient(clientID)
 		} else {
 			p.reversePairWarmer.InvalidateChannel(chID)

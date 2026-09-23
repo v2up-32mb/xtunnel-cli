@@ -18,10 +18,8 @@ func newWarmTestServer(t *testing.T) (*serverPool, *httptest.Server, *websocket.
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.Token = "token"
-	cfg.EnableHotPair = true
-	cfg.HotPairCount = 1
-	cfg.HotPairRefreshInterval = time.Second
 	p := newServerPool(cfg.Token, cfg)
+	// 预热器常驻，需模拟客户端 MsgReverseHotPair 授权后才会预热
 
 	server := httptest.NewServer(http.HandlerFunc(p.handleWebSocket))
 	conn1 := dialServerWS(t, server, "client-a", 1)
@@ -78,6 +76,11 @@ func TestReversePairWarmerBuildAndAcquire(t *testing.T) {
 
 	// 注册反向监听（端口 0 → 随机端口），使客户端进入预热名单
 	p.reverseManager.HandleReverseListen("client-a", 1, "lid-1", []byte("socks5://127.0.0.1:0"))
+	// 模拟客户端 MsgReverseHotPair 授权（经 handleMessage 路由）
+	p.handleMessage("client-a", 1, 4, protocol.MsgReverseHotPair, "", nil, nil)
+	if !p.reversePairWarmer.Enabled("client-a") {
+		t.Fatal("client should be enabled after MsgReverseHotPair")
+	}
 	// 回执帧由假客户端消费
 	mtype, _, gotMeta, _ := readFrameType(t, conn1, 3*time.Second)
 	if mtype != protocol.MsgReverseListenResult || gotMeta[0] != byte(protocol.StatusOK) {
@@ -143,6 +146,44 @@ func TestReversePairWarmerBuildAndAcquire(t *testing.T) {
 	}
 }
 
+// TestReversePairWarmerClientGoneRevokes 客户端全部通道掉线 → 授权撤销
+func TestReversePairWarmerClientGoneRevokes(t *testing.T) {
+	p, _, conn1, conn2, cleanup := newWarmTestServer(t)
+	defer cleanup()
+
+	p.reverseManager.HandleReverseListen("client-a", 1, "lid-1", []byte("socks5://127.0.0.1:0"))
+	p.handleMessage("client-a", 1, 4, protocol.MsgReverseHotPair, "", nil, nil)
+	if !p.reversePairWarmer.Enabled("client-a") {
+		t.Fatal("client should be enabled")
+	}
+	// 关闭该客户端全部通道 → 最后一条清理时 clientGone → 撤销授权
+	_ = conn1.Close()
+	_ = conn2.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !p.reversePairWarmer.Enabled("client-a") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("authorization should be revoked when client is gone")
+}
+
+// TestReversePairWarmerNotEnabledNoWarm 未授权客户端不预热
+func TestReversePairWarmerNotEnabledNoWarm(t *testing.T) {
+	p, _, conn1, _, cleanup := newWarmTestServer(t)
+	defer cleanup()
+
+	p.reverseManager.HandleReverseListen("client-a", 1, "lid-1", []byte("socks5://127.0.0.1:0"))
+	readFrameType(t, conn1, 3*time.Second) // 消费监听回执
+	p.reversePairWarmer.tryBuildPairs()
+
+	_ = conn1.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	if _, _, err := conn1.ReadMessage(); err == nil {
+		t.Fatal("unauthorized client should not receive prebind request")
+	}
+}
+
 // TestReverseDialStreamHotPairUnicast 就绪 Pair 下 DialStream 单播直达，不广播
 func TestReverseDialStreamHotPairUnicast(t *testing.T) {
 	p, _, conn1, conn2, cleanup := newWarmTestServer(t)
@@ -150,6 +191,7 @@ func TestReverseDialStreamHotPairUnicast(t *testing.T) {
 
 	p.reverseManager.HandleReverseListen("client-a", 1, "lid-1", []byte("socks5://127.0.0.1:0"))
 	readFrameType(t, conn1, 3*time.Second) // 消费监听回执
+	p.handleMessage("client-a", 1, 4, protocol.MsgReverseHotPair, "", nil, nil)
 
 	// 假目标服务（客户端侧出口）
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
