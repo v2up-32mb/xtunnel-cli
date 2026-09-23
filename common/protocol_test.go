@@ -175,3 +175,61 @@ func TestPrebindTargetConstant(t *testing.T) {
 		t.Errorf("PrebindTarget: got %q, want %q", PrebindTarget, "x-tunnel.prebind")
 	}
 }
+
+// TestHotPairNotifyRoundtrip 批量预热通道对通知编解码 roundtrip
+func TestHotPairNotifyRoundtrip(t *testing.T) {
+	entries := []HotPairInfo{
+		{Key: "prebind-aaaa", ChA: 1, ChB: 2},
+		{Key: "prebind-bbbb", ChA: 3, ChB: 4},
+	}
+	payload := EncodeHotPairNotify(entries)
+	got := DecodeHotPairNotify(payload)
+	if len(got) != 2 {
+		t.Fatalf("decoded %d entries, want 2", len(got))
+	}
+	for i, e := range entries {
+		if got[i] != e {
+			t.Fatalf("entry[%d] = %+v, want %+v", i, got[i], e)
+		}
+	}
+
+	// 完整消息帧 roundtrip
+	msg := EncodeMessage(MsgHotPairNotify, "", nil, payload)
+	tp, connID, meta, payload2, err := DecodeMessage(msg)
+	if err != nil || tp != MsgHotPairNotify || connID != "" || len(meta) != 0 {
+		t.Fatalf("frame decode: tp=%d connID=%q err=%v", tp, connID, err)
+	}
+	if got2 := DecodeHotPairNotify(payload2); len(got2) != 2 || got2[1].ChB != 4 {
+		t.Fatalf("frame payload decode: %+v", got2)
+	}
+}
+
+// TestDecodeHotPairNotifyTruncated 容忍尾部截断（跳过不完整记录）
+func TestDecodeHotPairNotifyTruncated(t *testing.T) {
+	payload := EncodeHotPairNotify([]HotPairInfo{{Key: "prebind-aaaa", ChA: 1, ChB: 2}})
+	got := DecodeHotPairNotify(append(payload, 0x05, 0xab))
+	if len(got) != 1 || got[0].Key != "prebind-aaaa" {
+		t.Fatalf("truncated decode: %+v", got)
+	}
+}
+
+// TestHotPairConnIDPrefix 拨号 connID 前缀组合与拆分
+func TestHotPairConnIDPrefix(t *testing.T) {
+	id := HotPairConnID("prebind-aaaa", "uuid-123")
+	if id != "prebind-aaaa.uuid-123" {
+		t.Fatalf("HotPairConnID = %q", id)
+	}
+	key, suffix, ok := SplitHotPairConnID(id)
+	if !ok || key != "prebind-aaaa" || suffix != "uuid-123" {
+		t.Fatalf("SplitHotPairConnID = (%q,%q,%v)", key, suffix, ok)
+	}
+	// 裸 uuid / 无前缀键 / 空段 → 不识别
+	for _, bad := range []string{"714425c9-uuid", "01.abc", "prebind-aaaa.", ".abc", ""} {
+		if _, _, ok := SplitHotPairConnID(bad); ok {
+			t.Fatalf("SplitHotPairConnID(%q) should not match", bad)
+		}
+	}
+	if HotPairConnID("", "x") != "" || HotPairConnID("prebind-a", "") != "" {
+		t.Fatal("HotPairConnID empty guard failed")
+	}
+}
