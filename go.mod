@@ -10,3 +10,5 @@ require (
 )
 
 require golang.org/x/net v0.17.0 // indirect
+
+replace github.com/v2up-32mb/xtunnel => /opt/xtunnel
