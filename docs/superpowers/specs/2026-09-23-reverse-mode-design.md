@@ -151,15 +151,21 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 反向按对称镜像在**服务端**实现 ReversePairWarmer（回程竞争 P2 只有请求方能做，故 Warmer 必须在服务端，客户端无法代劳）：
 
 ```
-预热(后台循环): 服务端向已注册监听器的客户端广播 MsgPrebindRequest(复用 0x10)
-                → 客户端拨号方半边处理(镜像 handlePrebindRequest)：
-                  首达占用、广播 MsgSelectUplink([X])、不拨号、选路完成后立即清理
-                → 服务端竞争收包，最快通道 Y = P2 → Pair {P1:X, P2:Y} Ready
-请求时:  AcquirePair → MsgTCPConnect 单播 P1（客户端视角 P1=到达通道，天然一致）
-                → 服务端已知 P2，直接经 P1 发 MsgSelectDownlink([P2])
-                → 客户端记录 P2。无竞争，首帧 ≈ 1 RTT
-兑底:    无 Ready Pair → 回退 §4b 广播+竞争流程；通道死亡(MsgChannelReset/断连)
+预热(后台循环，三步完成全部选路):
+  ① 服务端向已授权客户端广播 MsgPrebindRequest("prebind-x", 复用 0x10)
+  ② 客户端通道 X 首达占用 → 广播 MsgSelectUplink("prebind-x",[X])（不拨号）
+  ③ 服务端竞争收包，最快通道 Y = P2 → Pair{P1:X, P2:Y} 就绪，
+     并立即经 P1 回 MsgSelectDownlink("prebind-x",[Y]) —— 客户端据此补全
+     sendCh=P2 并保留 warm 状态。至此双方均持有 {P1,P2}，上下行竞争全部完成。
+请求时:  AcquirePair → 复用 prebind connID 作为关联凭证
+                → MsgTCPConnect("prebind-x",[策略,target]) 单播 P1（拨号期零选路消息）
+                → 客户端凭 warm 状态直接提升为真实连接（recvCh=P1、sendCh=P2 已知）
+                → 回 MsgConnStatus。无竞争，首帧 ≈ 1 RTT
+兑底:    无 Ready Pair → 回退 §4b 广播+竞争流程；客户端 warm 状态丢失（TTL 到期/
+         通道抖动）→ 客户端重新广播 MsgSelectUplink → 服务端采用其收包通道作为
+         发包通道并幂等补发一次 MsgSelectDownlink 修复；通道死亡(断连)
                 → InvalidateChannel 废弃包含该通道的 Pair 并重新预热
+         warm 状态 5s TTL 兜底清理，防服务端 Pair 未被消费时泄漏
 ```
 
 配置（v3 修订）：预热开关由**客户端启动参数**决定（与 `-l` 同一控制权归属）——客户端 `-r -hotpair` 时，每条通道就绪发送新增消息 `MsgReverseHotPair (0x22)`（空 meta/payload）授权服务端为本客户端预热；服务端**零配置项**，预热器常驻、参数为内部常量（每客户端 1 对、30s 刷新），仅对已授权且已注册监听器的客户端生效；客户端全部通道掉线撤销授权，重连需重新授权。旧服务端 switch 无此 case 自动忽略（无预热但功能不受影响）；旧客户端不发该消息，服务端永不预热。预绑定/预热请求与响应仍复用 `MsgPrebindRequest`/`MsgSelectUplink`，无格式变更。
@@ -210,21 +216,19 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
         │ ── MsgReverseListen(lid,"socks5://…:28180") 〔通道N〕 ─▶ │ 绑定 127.0.0.1:28180（幂等）
         │ ◀───── MsgReverseListenResult(OK) 〔同通道〕 ─────────── │ 日志：反向监听已开启
         │                                                        │
- ③ Pair │ ◀── MsgPrebindRequest("prebind-x",[策略,prebind]) 〔B〕 ─ │ 预热循环（授权 ∩ 有监听器）
-   预热 │ 通道 X 首达占用 rc{prebind}（不拨号）                     │
-        │ ── MsgSelectUplink("prebind-x",[X]) 〔B〕 ────────────▶ │ 竞争：最快到达通道 Y
-        │ （prebind 状态 5s TTL 兜底清理）                         │ Pair{P1:X, P2:Y} Ready（一次性）
+ ③ Pair │ ◀── ①MsgPrebindRequest("prebind-x",[策略,prebind]) 〔B〕─ │ 预热循环（授权 ∩ 有监听器）
+   预热 │ 通道 X 首达占用 rc{warm,recvCh=X}（不拨号）               │
+        │ ── ②MsgSelectUplink("prebind-x",[X]) 〔B〕 ───────────▶ │ 竞争：最快到达通道 Y
+        │ ◀── ③MsgSelectDownlink("prebind-x",[Y]) 〔P1=X〕 ────── │ Pair{P1:X, P2:Y} Ready（一次性）
+        │ 校验来自 P1=X → 补全 sendCh=Y，保留 warm 状态            │ 日志：Pair 构建完成
+        │ （至此上下行竞争全部完成，双方均持有 {P1,P2}）            │
         │                                                        │
  ④ 代理 │                                                 curl ──▶│ SOCKS5 :28180 accept（握手在服务端本地）
-   请求 │                                                        │ 解析 target，connID=uuid 登记反向表
-        │                                                        │ AcquirePair → 消费 {P1,P2}
-        │ ◀── MsgTCPConnect(connID,[策略,target]) 〔P1〕 ───────── │ 单播直达（免竞争，首帧 ≈1 RTT）
-        │ 反向表登记{target, recvCh=P1}                           │ （同通道 FIFO，先建连后定道 ↓）
-        │ ◀── MsgSelectDownlink(connID,[P2]) 〔P1〕 ───────────── │
-        │ 校验来自 P1 → 记 sendCh=P2                              │ 启动上行泵（管道→P1）
-        │ ── MsgSelectUplink(connID,[P1]) 〔B〕 ────────────────▶ │ sendCh≠0 → 忽略（无重复选路）
-        │ net.DialTimeout(target) → 成功                          │
-        │ ── MsgConnStatus(connID,OK) 〔B〕 ────────────────────▶ │ settle → DialStream 返回管道 conn
+   请求 │                                                        │ 解析 target；AcquirePair → 消费 {P1,P2}
+        │ ◀── MsgTCPConnect("prebind-x",[策略,target]) 〔P1〕 ──── │ 复用 prebind connID（关联凭证）
+        │ 凭 warm 状态直接提升为真实连接（零选路消息）              │ 单播直达（免竞争，首帧 ≈1 RTT）
+        │ net.DialTimeout(target) → 成功                          │ 启动上行泵（管道→P1）
+        │ ── MsgConnStatus("prebind-x",OK) 〔B〕 ───────────────▶ │ settle → DialStream 返回管道 conn
         │                                                        │ xshared 双向 io.Copy（用户 ↔ conn）
         │ ◀──────── 上行 MsgTCPData 〔P1〕 ────────────────────── │ 用户请求 → 管道 → 上行泵
         │ 校验 ch==P1 → 写本地 conn ──▶ 目标                      │
@@ -246,7 +250,8 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 ─────────────────────────────────────────────────────────────────────────────────
 ```
 
-- 无 `-hotpair` 时：跳过 ② 的授权帧与 ③ 整个阶段；④ 中服务端无 Pair 可取，回退 §4c 广播竞争流程。
+- 无 `-hotpair` 时：跳过 ② 的授权帧与 ③ 整个阶段；④ 中服务端无 Pair 可取，回退 §4c 广播竞争流程（生成全新 connID）。
+- 客户端 warm 状态丢失（5s TTL 到期未被消费/通道抖动）：④ 的 MsgTCPConnect 走普通路径——广播 `MsgSelectUplink` 重新选路，服务端采用其收包通道作为发包通道并幂等补发一次 `MsgSelectDownlink` 修复，功能不中断。
 - 服务端参数（预热 1 对、30s 刷新）为内部常量；开关与监听值均由客户端启动参数决定。
 - 通道中途死亡：两端 `cleanupChannel` 废弃绑定该通道的 Pair 与反向连接（对齐 §4c 兜底）。
 
