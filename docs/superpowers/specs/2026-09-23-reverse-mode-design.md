@@ -146,7 +146,7 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 
 ### HotPair 预热路径（-hotpair 启用时）
 
-正向（与反向同步修订）：预热三步完成全部选路——客户端广播 `MsgPrebindRequest`（connID=`prebind-<uuid>`，target=`x-tunnel.prebind`）→ 服务端首达占用 TX、回 `MsgSelectUplink`、**保留 warm 状态（TTL 兜底）** → 客户端竞争收包确定 RX 并经 TX 回 `MsgSelectDownlink([RX])`，服务端据此补全下行通道——至此双方均持有 `{TX,RX}`。拨号期：客户端复用 prebind connID 单播 `MsgTCPConnect`（`HotChannelPair.prebindConnID` 每次构建唯一；槽位号 `ID` 仅用于日志/刷新继承），服务端凭 warm 标记直接提升为真实连接，**零选路消息**，首帧 ≈ 1 RTT。兜底：无 Ready Pair 或单播失败 → 回退广播+竞争（全新 connID）；服务端 warm 状态 TTL 过期 → 客户端仍走提升前的广播竞争路径自愈。
+正向现状：`-hotpair` 时代理请求到达**不走广播竞争**——`AcquirePrimary()` 取 Ready 状态预热 Pair，`MsgTCPConnect` 单播到 `pair.UplinkChID`（首帧 ≈ 1 RTT）；`selectDownlink` 直接 CAS 采用预绑定 `pair.DownlinkChID`。竞争被 PairWarmer 后台提前执行：循环广播 `MsgPrebindRequest`（connID=`prebind-<uuid>`，target=`x-tunnel.prebind`）→ 服务端首达占用、回 `MsgSelectUplink`、立即注销不拨号 → 客户端竞争收包确定 RX → Pair `{TX,RX}` Ready。兜底：无 Ready Pair 或单播发送失败 → 回退广播+竞争并废弃该通道。
 
 反向按对称镜像在**服务端**实现 ReversePairWarmer（回程竞争 P2 只有请求方能做，故 Warmer 必须在服务端，客户端无法代劳）：
 

@@ -58,12 +58,9 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 		go p.connectTarget(st)
 
 	} else {
+		// 后续通道:丢弃
 		p.mu.Unlock()
-		// 预热 Pair 消费：warm 状态（target 仍为 PrebindTarget）且来自其上行通道
-		// → 提升为真实连接（拨号期零选路消息）；其余情况视为重复请求静默丢弃
-		if st.target == protocol.PrebindTarget && chID == st.uplinkChID {
-			p.promoteWarmPrebind(clientID, st, connID, meta)
-		}
+		// 已有其他通道处理此连接,静默丢弃
 	}
 }
 
@@ -251,7 +248,6 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 
 	st := &ServerConnState{
 		connID:     connID,
-		target:     protocol.PrebindTarget, // warm 标记：拨号期以同一 connID 提升（见 promoteWarmPrebind）
 		uplinkChID: chID,
 		ipStrategy: ipStrategy,
 		connected:  true,
@@ -271,65 +267,8 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
 	_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
 
-	// 预热 warm 状态：等待客户端 MsgSelectDownlink 完成下行选路（handleSelectDownlink
-	// 补全 downlinkChID），并在 TTL 内等待客户端以同一 connID 发起真实拨号
-	// （handleTCPConnect 提升分支，拨号期零选路消息）；超时未消费则清理防泄漏
-	time.AfterFunc(prebindWarmTTL, func() {
-		p.mu.RLock()
-		cur := p.conns[connID]
-		p.mu.RUnlock()
-		if cur == nil {
-			return
-		}
-		cur.mu.RLock()
-		warm := cur.target == protocol.PrebindTarget
-		cur.mu.RUnlock()
-		if warm {
-			p.unregisterConn(connID)
-		}
-	})
-}
-
-// prebindWarmTTL 预热 warm 状态存活期（需覆盖客户端 PrebindTimeout=3s + 往返）
-var prebindWarmTTL = 5 * time.Second
-
-// promoteWarmPrebind 预热 Pair 消费：把 warm 状态提升为真实连接。
-// 收发通道预热期已协商完毕（uplink=到达通道，downlink=预热期 MsgSelectDownlink），
-// 零选路消息；预热下行通道失效时回退竞争（广播 MsgSelectUplink）。
-func (p *serverPool) promoteWarmPrebind(clientID string, st *ServerConnState, connID string, meta []byte) {
-	if len(meta) < 1 {
-		return
-	}
-	st.mu.Lock()
-	if st.target != protocol.PrebindTarget {
-		// 已被提升（并发副本），静默忽略
-		st.mu.Unlock()
-		return
-	}
-	st.target = string(meta[1:])
-	st.ipStrategy = protocol.IPStrategy(meta[0])
-	downlink := st.downlinkChID
-	downlinkOK := false
-	if downlink > 0 {
-		p.mu.RLock()
-		ws := p.clientChConns[clientID][downlink]
-		p.mu.RUnlock()
-		downlinkOK = ws != nil && !ws.closed && ws.clientID == clientID
-	}
-	if !downlinkOK {
-		st.downlinkChID = 0
-	}
-	st.mu.Unlock()
-
-	if !downlinkOK {
-		log.Printf("[服务端] 预热下行通道 %d 已失效，回退下行竞争, ID:%s", downlink, protocol.ShortID(connID))
-		uplinkChIDBytes := make([]byte, 4)
-		binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(st.uplinkChID))
-		_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
-	}
-
-	log.Printf("[服务端] %s 访问: %s, 通道: TX %d (预热 Pair 直达), ID:%s", st.clientAddr, st.target, st.uplinkChID, protocol.ShortID(connID))
-	go p.connectTarget(st)
+	// 预绑定只完成上行选择，立即清理状态，避免泄漏
+	p.unregisterConn(connID)
 }
 
 // forwardTargetToClient 转发目标→客户端数据
