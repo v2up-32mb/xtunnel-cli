@@ -120,7 +120,7 @@ func (p *serverPool) reverseUpstreamPump(rc *ServerReverseConn) {
 	connID := rc.connID
 	buf := make([]byte, 64*1024)
 	for {
-		n, err := rc.app.Read(buf)
+		n, err := rc.pipe.Read(buf)
 		if err != nil {
 			// 应用侧关闭（SOCKS5 隧道拆除属正常路径）：通知客户端关闭并清理
 			p.reverseNotifyClose(rc)
