@@ -193,6 +193,63 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 - 背压：S→C 走服务端既有全局写队列 + `MsgBackpressure`；C→S 走客户端既有 `writeQueues`。零新增状态机。
 - 通道死亡：两端 `cleanupChannel` 关闭绑定该通道的反向连接（对齐正向现有行为）。
 
+## 4d. 全生命周期时序（-hotpair 启用；从客户端启动到断开）
+
+图例：〔B〕=广播；〔P1〕〔P2〕〔通道N〕=单播；时间自上而下。P1=服务端发包通道（客户端首达占用），P2=客户端发包通道（服务端首达竞争）。
+
+```
+ 客户端  -r -hotpair -l socks5://127.0.0.1:28180              服务端（零配置）
+─────────────────────────────────────────────────────────────────────────────────
+ ① 启动
+        │ ═ WSS 拨号 ×N（TLS/ECH，token 走 subprotocol）════════▶ │ 通道 1..N 注册
+        │ ◀──────────────── 101 Switching Protocols ──────────── │ 日志：通道 X 已连接
+        │                                                        │
+ ② 授权+│ ═ 每条通道就绪 reverseOnChannelReady ═══════════════════
+   监听 │ ── MsgReverseHotPair (0x22) 〔通道N〕 ─────────────────▶ │ 预热授权 enabled+={client}
+        │                                                        │ Kick：立即补足预热
+        │ ── MsgReverseListen(lid,"socks5://…:28180") 〔通道N〕 ─▶ │ 绑定 127.0.0.1:28180（幂等）
+        │ ◀───── MsgReverseListenResult(OK) 〔同通道〕 ─────────── │ 日志：反向监听已开启
+        │                                                        │
+ ③ Pair │ ◀── MsgPrebindRequest("prebind-x",[策略,prebind]) 〔B〕 ─ │ 预热循环（授权 ∩ 有监听器）
+   预热 │ 通道 X 首达占用 rc{prebind}（不拨号）                     │
+        │ ── MsgSelectUplink("prebind-x",[X]) 〔B〕 ────────────▶ │ 竞争：最快到达通道 Y
+        │ （prebind 状态 5s TTL 兜底清理）                         │ Pair{P1:X, P2:Y} Ready（一次性）
+        │                                                        │
+ ④ 代理 │                                                 curl ──▶│ SOCKS5 :28180 accept（握手在服务端本地）
+   请求 │                                                        │ 解析 target，connID=uuid 登记反向表
+        │                                                        │ AcquirePair → 消费 {P1,P2}
+        │ ◀── MsgTCPConnect(connID,[策略,target]) 〔P1〕 ───────── │ 单播直达（免竞争，首帧 ≈1 RTT）
+        │ 反向表登记{target, recvCh=P1}                           │ （同通道 FIFO，先建连后定道 ↓）
+        │ ◀── MsgSelectDownlink(connID,[P2]) 〔P1〕 ───────────── │
+        │ 校验来自 P1 → 记 sendCh=P2                              │ 启动上行泵（管道→P1）
+        │ ── MsgSelectUplink(connID,[P1]) 〔B〕 ────────────────▶ │ sendCh≠0 → 忽略（无重复选路）
+        │ net.DialTimeout(target) → 成功                          │
+        │ ── MsgConnStatus(connID,OK) 〔B〕 ────────────────────▶ │ settle → DialStream 返回管道 conn
+        │                                                        │ xshared 双向 io.Copy（用户 ↔ conn）
+        │ ◀──────── 上行 MsgTCPData 〔P1〕 ────────────────────── │ 用户请求 → 管道 → 上行泵
+        │ 校验 ch==P1 → 写本地 conn ──▶ 目标                      │
+        │ ◀──────── 下行 MsgTCPData 〔P2〕 ──────────────────────▶│ 目标响应 → 客户端读泵(sendCh=P2)
+        │ 目标 ──▶ 读泵                                          │ 校验 ch==P2 → 写管道 → 用户
+        │                                                        │
+ ⑤ 连接 │ curl 结束 → SOCKS5 拆隧道 → rc.app 关闭                  │
+   关闭 │ ◀── MsgTCPClose(connID) 〔P1〕 ──────────────────────── │ 上行泵管道 EOF → 通知并清理
+        │ 关本地 conn，反向表删除                                  │ 反向表删除
+        │ （若目标先关：客户端 ── MsgTCPClose 〔P2〕 ──▶ 服务端清理）│
+        │                                                        │
+ ⑥ 断开 │ SIGINT/SIGTERM → Shutdown()                             │
+        │ ── WebSocket Close Frame (1000) 〔每通道〕 ────────────▶ │ readLoop 退出 → cleanupChannel ×2
+        │                                                        │ 最后一条 = clientGone：
+        │                                                        │  · 监听注销 → 28180 端口释放
+        │                                                        │  · 预热授权撤销 + Pair 全废弃
+        │                                                        │  · 残留反向连接清理
+        │                                                        │ 日志：通道 X 已断开
+─────────────────────────────────────────────────────────────────────────────────
+```
+
+- 无 `-hotpair` 时：跳过 ② 的授权帧与 ③ 整个阶段；④ 中服务端无 Pair 可取，回退 §4c 广播竞争流程。
+- 服务端参数（预热 1 对、30s 刷新）为内部常量；开关与监听值均由客户端启动参数决定。
+- 通道中途死亡：两端 `cleanupChannel` 废弃绑定该通道的 Pair 与反向连接（对齐 §4c 兜底）。
+
 ## 5. 监听器生命周期
 
 - **注册**：客户端每建好一条通道就发送 `MsgReverseListen`（每个 `-l` 值一条）。服务端按 `(clientID, 监听值)` 幂等去重——重复注册直接回 OK，不重复 bind。每通道都发的好处：服务端重启后首个重连通道自动恢复全部监听，无需额外状态同步。
