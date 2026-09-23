@@ -59,7 +59,10 @@ func main() {
 	}
 	defer c.Shutdown()
 
-	// 启动本地代理监听器
+	if reverseMode {
+		log.Printf("[客户端] 反向模式：监听将由服务端按 -l 参数开启")
+	} else {
+		// 启动本地代理监听器
 	for _, addr := range listenAddrs {
 		a := addr // 创建局部变量
 		go func() {
@@ -77,6 +80,7 @@ func main() {
 				log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
 			}
 		}()
+	}
 	}
 
 	log.Printf("[客户端] 已启动,等待连接...")
@@ -120,6 +124,8 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&bypassRules, "bypass-rules", "", "自定义绕过规则（多行，支持 domain:/full:/IP/CIDR）")
 	fs.StringVar(&geoIPPath, "geo-ip", "", "geoip.dat 路径（v2ray 格式，覆盖内置 CN 段；留空探测程序同目录）")
 	fs.StringVar(&geoSitePath, "geo-site", "", "geosite.dat 路径（v2ray 格式，覆盖内置 CN 域名；留空探测程序同目录）")
+	fs.BoolVar(&reverseMode, "reverse", false, "启用反向模式：-l 参数不再开启本地监听，而是由服务端监听")
+	fs.BoolVar(&reverseMode, "r", false, "启用反向模式：-l 参数不再开启本地监听，而是由服务端监听")
 }
 
 var (
@@ -151,6 +157,7 @@ var (
 	bypassRules             string
 	geoIPPath               string
 	geoSitePath             string
+	reverseMode             bool
 )
 
 var bypassMatcher *xsharedrouting.Matcher
@@ -232,6 +239,14 @@ func parseFlags() *xtunnel.Config {
 	cfg.FastRetryWindow = fastRetryWindow
 	cfg.MaxFastRetryConsecutive = maxFastRetryConsecutive
 	cfg.BackpressureLimitBytes = backpressureLimitBytes
+
+	cfg.EnableReverse = reverseMode
+	if reverseMode {
+		cfg.ReverseListeners = parseListenAddrs()
+		cfg.OnReverseError = func(err error) {
+			log.Fatalf("[客户端] %v", err)
+		}
+	}
 
 	// 生成并复用客户端 ID
 	cfg.ClientID = uuid.NewString()

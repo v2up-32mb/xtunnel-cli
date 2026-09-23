@@ -48,6 +48,13 @@ type serverPool struct {
 	// 不会互相占用/拒绝（协议路由始终能通过 conn 状态或来源连接定位客户端）。
 	clientChConns map[string]map[int]*ServerWSConn
 
+	// 反向连接状态
+	revMu    sync.RWMutex
+	revConns map[string]*ServerReverseConn
+
+	// 反向监听管理器
+	reverseManager *ReverseListenerManager
+
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
 	globalQueueLimit     int64 // 全局队列字节限制
@@ -67,8 +74,21 @@ func newServerPool(token string, config *Config) *serverPool {
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
+		revConns:          make(map[string]*ServerReverseConn),
 		globalQueueLimit:  limit,
 		backpressureState: int32(protocol.BackpressureNormal),
+	}
+}
+
+// initReverseManager 延迟初始化 ReverseListenerManager 以避免循环依赖
+func (p *serverPool) initReverseManager() {
+	if p.reverseManager == nil && p.config != nil {
+		m := NewReverseListenerManager(p.config.MaxReverseListeners)
+		p.reverseManager = m
+	}
+	// 确保 manager 持有 pool 引用（懒设置）
+	if p.reverseManager != nil && p.reverseManager.pool == nil {
+		p.reverseManager.pool = p
 	}
 }
 
@@ -213,6 +233,18 @@ func (p *serverPool) countActiveChannelsLocked(clientID string) (total int, clie
 	return
 }
 
+func (p *serverPool) countActiveChannelsForClient(clientID string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	cnt := 0
+	for _, wsConn := range p.wsConns {
+		if wsConn != nil && !wsConn.closed && wsConn.clientID == clientID {
+			cnt++
+		}
+	}
+	return cnt
+}
+
 func (p *serverPool) connectTimeout() time.Duration {
 	if p == nil || p.config == nil || p.config.HandshakeTimeout <= 0 {
 		return 10 * time.Second
@@ -243,7 +275,19 @@ func (p *serverPool) addReceivedBytes(n int) {
 // clientID 是消息来源 WebSocket 连接所属的客户端，用于在客户端各自的通道编号空间内路由。
 func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType protocol.MessageType, connID string, meta, payload []byte) {
 	p.addReceivedBytes(rawLen)
+	// 确保反向管理器已初始化
+	if p.reverseManager == nil {
+		p.initReverseManager()
+	}
+	// 反向连接拦截：优先处理反向连接表中的 connID
+	if rc := p.getReverseConn(connID); rc != nil && rc.ownerClientID == clientID {
+		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
+		return
+	}
 	switch msgType {
+	case protocol.MsgReverseListen:
+		p.reverseManager.HandleReverseListen(clientID, chID, connID, meta)
+		return
 	case protocol.MsgTCPConnect:
 		p.handleTCPConnect(clientID, chID, connID, meta)
 
@@ -342,6 +386,7 @@ func (p *serverPool) sendToChannel(clientID string, chID int, msgType int, data 
 
 // cleanupChannel 清理指定客户端的通道
 func (p *serverPool) cleanupChannel(clientID string, chID int) {
+	var clientGone bool
 	p.mu.Lock()
 
 	var wsConn *ServerWSConn
@@ -350,6 +395,7 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		delete(m, chID)
 		if len(m) == 0 {
 			delete(p.clientChConns, clientID)
+			clientGone = true
 		}
 	}
 	for i, wc := range p.wsConns {
@@ -375,6 +421,23 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 
 	for _, connID := range toClose {
 		p.unregisterConn(connID)
+	}
+
+	// 清理反向连接
+	p.revMu.Lock()
+	for connID, rc := range p.revConns {
+		if rc.ownerClientID == clientID && (atomic.LoadInt32(&rc.sendCh) == int32(chID) || atomic.LoadInt32(&rc.recvCh) == int32(chID)) {
+			delete(p.revConns, connID)
+			if rc.pipe != nil {
+				_ = rc.pipe.Close()
+			}
+			close(rc.result)
+		}
+	}
+	p.revMu.Unlock()
+
+	if clientGone && p.reverseManager != nil {
+		p.reverseManager.ShutdownClient(clientID)
 	}
 
 	if wsConn != nil {
