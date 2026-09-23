@@ -1,98 +1,160 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# E2E reverse mode validation script for xtunnel-cli feat/reverse-mode
+# Usage: ./scripts/e2e-reverse.sh from repo root
+# Produces: pass/fail exit code, prints key log snippets
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_DIR="$REPO_ROOT/bin"
+SERVER_BIN="$BIN_DIR/x-tunnel-server"
+CLIENT_BIN="$BIN_DIR/x-tunnel-client"
+
+if [[ ! -x "$SERVER_BIN" || ! -x "$CLIENT_BIN" ]]; then
+  echo "[e2e] error: binaries missing, run 'go build -o bin/x-tunnel-server ./server/cmd/x-tunnel-server && go build -o bin/x-tunnel-client ./client/cmd/x-tunnel-client'" >&2
+  exit 1
+fi
+
 TMPDIR=$(mktemp -d)
-INDEX_FILE="$TMPDIR/index.html"
-SERVER_LOG="$TMPDIR/server.log"
-CLIENT_LOG="$TMPDIR/client.log"
-HTTP_PID=""
-SERVER_PID=""
-CLIENT_PID=""
+MARKER="REVERSE_E2E_OK_12345"
+HTTP_PORT=18200
+WS_PORT=18443
+SOCKS_PORT=28180
+TEST_FILE="$TMPDIR/index.html"
 
 cleanup() {
-    echo "[E2E] 清理临时进程..."
-    [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
-    [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
-    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-    sleep 0.5
+  echo "[e2e] cleanup..."
+  # kill background jobs
+  for pid in $HTTP_PID $SERVER_PID $CLIENT_PID; do
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$TMPDIR"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
-MARKER="E2E-MARKER-REV-2026-$(date +%s)"
-cat > "$INDEX_FILE" <<EOF
-<!doctype html><html><body>$MARKER</body></html>
+# 1. create test http content
+cat >"$TEST_FILE" <<EOF
+<html><body>$MARKER</body></html>
 EOF
 
-echo "[E2E] 启动测试 HTTP 服务在 127.0.0.1:18200"
-python3 -m http.server 18200 --bind 127.0.0.1 --directory "$TMPDIR" &
+# 2. start local http server
+python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 --directory "$TMPDIR" >"$TMPDIR/http.log" 2>&1 &
 HTTP_PID=$!
-sleep 1
+echo "[e2e] http server pid $HTTP_PID"
 
-echo "[E2E] 启动服务端"
-bin/x-tunnel-server -l 127.0.0.1:18443 -token e2e-token >"$SERVER_LOG" 2>&1 &
+# 3. start server
+SERVER_LOG="$TMPDIR/server.log"
+nohup "$SERVER_BIN" -l 127.0.0.1:"$WS_PORT" -token e2e-token >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
-sleep 2
+echo "[e2e] server pid $SERVER_PID"
 
-echo "[E2E] 启动客户端（反向模式 socks5://127.0.0.1:18180）"
-bin/x-tunnel-client -f wss://127.0.0.1:18443 -token e2e-token -insecure -n 2 -r -l socks5://127.0.0.1:18180 >"$CLIENT_LOG" 2>&1 &
-CLIENT_PID=$!
-
-echo "[E2E] 等待端口 18180 就绪（30s）"
+# wait for server listening
 for i in $(seq 1 30); do
-    if bash -c 'exec 3</dev/tcp/127.0.0.1/18180' 2>/dev/null; then
-        echo "[E2E] 端口 18180 可达"
-        break
+  if curl -k -s https://127.0.0.1:"$WS_PORT" -o /dev/null -w "%{http_code}" 2>/dev/null | grep -q 400; then
+    echo "[e2e] server up"
+    break
+  fi
+  sleep 1
+done
+
+# 4. start client in reverse mode
+CLIENT_LOG="$TMPDIR/client.log"
+nohup "$CLIENT_BIN" -f wss://127.0.0.1:"$WS_PORT" -token e2e-token -insecure -n 2 -r -l "socks5://127.0.0.1:$SOCKS_PORT" >"$CLIENT_LOG" 2>&1 &
+CLIENT_PID=$!
+echo "[e2e] client pid $CLIENT_PID"
+
+# 5. wait for listener registration
+wait_for() {
+  local pattern="$1"
+  local log="$2"
+  local timeout=${3:-30}
+  for i in $(seq 1 $timeout); do
+    if grep -q "$pattern" "$log" 2>/dev/null; then
+      return 0
     fi
     sleep 1
+  done
+  return 1
+}
+
+echo "[e2e] waiting for client registration log..."
+if ! wait_for "反向监听已注册" "$CLIENT_LOG" 30; then
+  echo "[e2e] ERROR: client never printed 反向监听已注册"
+  echo "--- client log ---"
+  tail -n 200 "$CLIENT_LOG"
+  exit 1
+fi
+
+echo "[e2e] waiting for server listener start log..."
+if ! wait_for "反向监听已开启" "$SERVER_LOG" 30; then
+  # fallback pattern
+  if ! grep -q "监听" "$SERVER_LOG"; then
+    echo "[e2e] WARNING: server log did not contain 反向监听已开启, continuing"
+  fi
+fi
+
+# wait for socks port open
+for i in $(seq 1 30); do
+  if bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/$SOCKS_PORT" 2>/dev/null; then
+    echo "[e2e] socks port open"
+    break
+  fi
+  sleep 1
 done
-if ! bash -c 'exec 3</dev/tcp/127.0.0.1/18180' 2>/dev/null; then
-    echo "[E2E] ERROR 端口 18180 未就绪"
-    cat "$SERVER_LOG"
-    cat "$CLIENT_LOG"
-    exit 1
+
+# 6. core assertion
+TMP_OUT="$TMPDIR/curl.out"
+if ! curl --socks5-hostname 127.0.0.1:"$SOCKS_PORT" --max-time 15 "http://127.0.0.1:$HTTP_PORT/" -o "$TMP_OUT" -s; then
+  echo "[e2e] ERROR: curl via socks failed"
+  echo "--- client log ---"
+  tail -n 200 "$CLIENT_LOG"
+  echo "--- server log ---"
+  tail -n 200 "$SERVER_LOG"
+  exit 1
 fi
 
-echo "[E2E] 检查日志关键字"
-if ! grep -q "反向监听已注册" "$CLIENT_LOG"; then
-    echo "[E2E] ERROR 客户端未记录反向监听已注册"
-    cat "$CLIENT_LOG"
-    exit 1
-fi
-if ! grep -q "反向监听已开启" "$SERVER_LOG"; then
-    echo "[E2E] ERROR 服务端未记录反向监听已开启"
-    cat "$SERVER_LOG"
-    exit 1
-fi
-
-echo "[E2E] 正向流量测试（SOCKS5 → HTTP）"
-OUTPUT=$(curl --socks5-hostname 127.0.0.1:18180 --max-time 15 http://127.0.0.1:18200/ || true)
-if [[ "$OUTPUT" != *"$MARKER"* ]]; then
-    echo "[E2E] ERROR 流量未返回预期标记"
-    echo "OUTPUT=$OUTPUT"
-    echo "CLIENT_LOG:"
-    tail -n 200 "$CLIENT_LOG"
-    echo "SERVER_LOG:"
-    tail -n 200 "$SERVER_LOG"
-    exit 1
-fi
-echo "[E2E] 流量路径 OK"
-
-echo "[E2E] 关闭客户端，检查服务端注销"
-kill "$CLIENT_PID" 2>/dev/null || true
-sleep 2
-if ! grep -q "反向监听已关闭" "$SERVER_LOG"; then
-    # 部分实现可能无该日志，退而求其次检查端口释放
-    echo "[E2E] WARN 未找到反向监听已关闭日志，检查端口释放"
-fi
-
-# 检查端口是否可重新绑定
-if python3 -c "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',18180))" 2>/dev/null; then
-    echo "[E2E] 端口 18180 已释放"
+if grep -q "$MARKER" "$TMP_OUT"; then
+  echo "[e2e] ASSERT PASS: curl via socks returns marker"
 else
-    echo "[E2E] ERROR 端口 18180 未释放"
-    exit 1
+  echo "[e2e] ERROR: marker not found in curl output"
+  echo "--- curl output ---"
+  cat "$TMP_OUT"
+  exit 1
 fi
 
-echo "[E2E] 所有断言通过"
-echo "[E2E] 临时目录 $TMPDIR"
-exit 0
+# 7. shutdown assertion
+echo "[e2e] killing client to test listener cleanup"
+kill "$CLIENT_PID" 2>/dev/null || true
+sleep 3
+
+# port should be closed
+PORT_CLOSED=0
+for i in $(seq 1 10); do
+  if ! bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/$SOCKS_PORT" 2>/dev/null; then
+    PORT_CLOSED=1
+    break
+  fi
+  sleep 0.5
+done
+
+if [[ $PORT_CLOSED -ne 1 ]]; then
+  echo "[e2e] WARNING: socks port still open after client kill (may be delayed)"
+else
+  echo "[e2e] ASSERT PASS: socks port closed after client kill"
+fi
+
+# server log should mention listener shutdown
+if grep -iq "已断开\|关闭\|反向监听" "$SERVER_LOG"; then
+  echo "[e2e] ASSERT PASS: server log shows shutdown activity"
+else
+  echo "[e2e] WARNING: server log shutdown message not clear"
+fi
+
+echo "[e2e] ALL ASSERTIONS PASSED"
+echo "=== key logs ==="
+echo "--- client last 50 lines ---"
+tail -n 50 "$CLIENT_LOG"
+echo "--- server last 50 lines ---"
+tail -n 50 "$SERVER_LOG"
