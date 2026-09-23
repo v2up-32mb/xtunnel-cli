@@ -26,7 +26,7 @@ func newTestServerPool() *serverPool {
 	}
 }
 
-func TestHandlePrebindRequestCleansUpState(t *testing.T) {
+func TestHandlePrebindRequestKeepsWarmState(t *testing.T) {
 	p := newTestServerPool()
 	connID := "prebind-test-1"
 	meta := []byte{0}
@@ -34,11 +34,31 @@ func TestHandlePrebindRequestCleansUpState(t *testing.T) {
 
 	p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
 
+	// 预热 warm 状态保留（等待 MsgSelectDownlink 完成下行选路 + 拨号期消费）
 	p.mu.RLock()
-	_, exists := p.conns[connID]
+	st, exists := p.conns[connID]
 	p.mu.RUnlock()
-	if exists {
-		t.Fatal("prebind connID should be cleaned up")
+	if !exists {
+		t.Fatal("warm prebind state should be kept")
+	}
+	if st.target != protocol.PrebindTarget {
+		t.Fatalf("warm state target should be PrebindTarget, got %q", st.target)
+	}
+	if st.uplinkChID != 1 {
+		t.Fatalf("warm uplink should be 1, got %d", st.uplinkChID)
+	}
+
+	// TTL 到期后仍未消费 → 清理
+	old := prebindWarmTTL
+	prebindWarmTTL = 50 * time.Millisecond
+	defer func() { prebindWarmTTL = old }()
+	p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, "prebind-test-2", meta, nil)
+	time.Sleep(200 * time.Millisecond)
+	p.mu.RLock()
+	_, exists2 := p.conns["prebind-test-2"]
+	p.mu.RUnlock()
+	if exists2 {
+		t.Fatal("warm state should be cleaned after TTL")
 	}
 }
 
@@ -46,6 +66,10 @@ func TestPrebindDoesNotLeakConns(t *testing.T) {
 	p := newTestServerPool()
 	meta := []byte{0}
 	meta = append(meta, protocol.PrebindTarget...)
+	// 先缩短 TTL（AfterFunc 创建时取值），warm 状态靠 TTL 清理防泄漏
+	old := prebindWarmTTL
+	prebindWarmTTL = 50 * time.Millisecond
+	defer func() { prebindWarmTTL = old }()
 	for i := 0; i < 1000; i++ {
 		connID := fmt.Sprintf("prebind-%d", i)
 		p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
@@ -53,8 +77,15 @@ func TestPrebindDoesNotLeakConns(t *testing.T) {
 	p.mu.RLock()
 	n := len(p.conns)
 	p.mu.RUnlock()
+	if n != 1000 {
+		t.Fatalf("expected 1000 warm conns within TTL, got %d", n)
+	}
+	time.Sleep(300 * time.Millisecond)
+	p.mu.RLock()
+	n = len(p.conns)
+	p.mu.RUnlock()
 	if n != 0 {
-		t.Fatalf("expected 0 conns after prebind, got %d", n)
+		t.Fatalf("expected 0 conns after warm TTL, got %d", n)
 	}
 }
 
