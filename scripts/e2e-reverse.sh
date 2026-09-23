@@ -159,7 +159,7 @@ wait "$SERVER_PID" 2>/dev/null || true
 sleep 1
 
 SERVER_LOG_HP="$TMPDIR/server-hotpair.log"
-nohup "$SERVER_BIN" -l 127.0.0.1:"$WS_PORT" -token e2e-token -hotpair >"$SERVER_LOG_HP" 2>&1 &
+nohup "$SERVER_BIN" -l 127.0.0.1:"$WS_PORT" -token e2e-token >"$SERVER_LOG_HP" 2>&1 &
 SERVER_PID=$!
 
 for i in $(seq 1 30); do
@@ -170,7 +170,7 @@ for i in $(seq 1 30); do
 done
 
 CLIENT_LOG_HP="$TMPDIR/client-hotpair.log"
-nohup "$CLIENT_BIN" -f wss://127.0.0.1:"$WS_PORT" -token e2e-token -insecure -n 2 -r -l "socks5://127.0.0.1:$SOCKS_PORT" >"$CLIENT_LOG_HP" 2>&1 &
+nohup "$CLIENT_BIN" -f wss://127.0.0.1:"$WS_PORT" -token e2e-token -insecure -n 2 -r -hotpair -l "socks5://127.0.0.1:$SOCKS_PORT" >"$CLIENT_LOG_HP" 2>&1 &
 CLIENT_PID=$!
 
 if ! wait_for "反向监听已注册" "$CLIENT_LOG_HP" 30; then
