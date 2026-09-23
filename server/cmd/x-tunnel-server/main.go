@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"log"
-	"time"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"x-tunnel/server/pkg"
 )
@@ -50,6 +50,9 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&maxChannelsPerClient, "max-client-channels", 0, "每个客户端最大通道数，0 表示无限制")
 	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 32<<20, "全局队列背压阈值（字节），默认 32MB")
 	fs.IntVar(&maxReverseListeners, "max-reverse-listeners", 3, "每个客户端最大反向监听器数，默认 3")
+	fs.BoolVar(&hotPair, "hotpair", false, "启用反向预热通道对（Hot Pair，降低反向拨号首帧延迟）")
+	fs.IntVar(&hotPairCount, "hotpair-count", 1, "每客户端预热 Pair 数量，默认 1")
+	fs.DurationVar(&hotPairRefreshInterval, "hotpair-refresh", 30*time.Second, "预热刷新间隔，默认 30s")
 }
 
 var (
@@ -94,6 +97,9 @@ func parseFlags() *server.Config {
 	cfg.MaxChannelsPerClient = maxChannelsPerClient
 	cfg.BackpressureLimitBytes = backpressureLimitBytes
 	cfg.MaxReverseListeners = maxReverseListeners
+	cfg.EnableHotPair = hotPair
+	cfg.HotPairCount = hotPairCount
+	cfg.HotPairRefreshInterval = hotPairRefreshInterval
 
 	return cfg
 }

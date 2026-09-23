@@ -64,6 +64,11 @@ func (w *ReversePairWarmer) Start() {
 }
 
 // Stop 停止预热循环
+// Kick 非阻塞触发一轮预热构建（监听注册/通道连上时调用，不必等刷新周期）
+func (w *ReversePairWarmer) Kick() {
+	go w.tryBuildPairs()
+}
+
 func (w *ReversePairWarmer) Stop() {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 }

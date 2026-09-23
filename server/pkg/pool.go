@@ -211,6 +211,11 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
 
+	// 反向预热：新通道就绪即尝试补足预热 Pair
+	if p.reversePairWarmer != nil {
+		p.reversePairWarmer.Kick()
+	}
+
 	// 启动写入协程
 	wsConn.start()
 
