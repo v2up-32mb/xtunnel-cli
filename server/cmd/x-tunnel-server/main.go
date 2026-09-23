@@ -52,15 +52,15 @@ func registerFlags(fs *flag.FlagSet) {
 }
 
 var (
-	configFile              string
-	listenAddr              string
-	token                   string
-	certFile                string
-	keyFile                 string
-	maxTotalChannels        int
-	maxChannelsPerClient    int
-	backpressureLimitBytes  int
-	maxReverseListeners     int
+	configFile             string
+	listenAddr             string
+	token                  string
+	certFile               string
+	keyFile                string
+	maxTotalChannels       int
+	maxChannelsPerClient   int
+	backpressureLimitBytes int
+	maxReverseListeners    int
 )
 
 func parseFlags() *server.Config {

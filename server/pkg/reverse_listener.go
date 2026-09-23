@@ -8,8 +8,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/v2up-32mb/xshared/config"
-	"github.com/v2up-32mb/xshared/socks5"
 	"github.com/v2up-32mb/xshared/httpproxy"
+	"github.com/v2up-32mb/xshared/socks5"
+	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
@@ -71,11 +72,23 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 	}
 
 	dialer := &reverseDialer{pool: m.pool, clientID: clientID}
+	_, user, pass, scheme, err := parseListenerSpec(specStr)
+	if err != nil {
+		m.reply(clientID, chID, listenerID, protocol.StatusERR, err.Error())
+		return
+	}
+
 	var srv interface{ Close() error }
 	switch scheme {
 	case "socks5":
 		cfg := &config.Config{ListenAddress: host}
-		s := socks5.NewServer(cfg, dialer)
+		opts := []socks5.Option{}
+		if user != "" || pass != "" {
+			opts = append(opts, socks5.WithUserPassAuth(func(u, p string) bool {
+				return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+			}))
+		}
+		s := socks5.NewServer(cfg, dialer, opts...)
 		srv = s
 		if err := s.Start(); err != nil {
 			m.reply(clientID, chID, listenerID, protocol.StatusERR, err.Error())
@@ -83,7 +96,13 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		}
 	case "http":
 		cfg := &config.Config{ListenAddress: host}
-		s := httpproxy.NewServer(cfg, dialer)
+		opts := []httpproxy.Option{}
+		if user != "" || pass != "" {
+			opts = append(opts, httpproxy.WithUserPassAuth(func(u, p string) bool {
+				return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+			}))
+		}
+		s := httpproxy.NewServer(cfg, dialer, opts...)
 		srv = s
 		if err := s.Start(); err != nil {
 			m.reply(clientID, chID, listenerID, protocol.StatusERR, err.Error())

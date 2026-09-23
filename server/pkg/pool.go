@@ -68,7 +68,7 @@ func newServerPool(token string, config *Config) *serverPool {
 	if limit <= 0 {
 		limit = 32 << 20 // 默认 32MB
 	}
-	return &serverPool{
+	p := &serverPool{
 		config:            config,
 		token:             token,
 		conns:             make(map[string]*ServerConnState),
@@ -78,19 +78,12 @@ func newServerPool(token string, config *Config) *serverPool {
 		globalQueueLimit:  limit,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
+	p.reverseManager = NewReverseListenerManager(config.MaxReverseListeners)
+	p.reverseManager.pool = p
+	return p
 }
 
-// initReverseManager 延迟初始化 ReverseListenerManager 以避免循环依赖
-func (p *serverPool) initReverseManager() {
-	if p.reverseManager == nil && p.config != nil {
-		m := NewReverseListenerManager(p.config.MaxReverseListeners)
-		p.reverseManager = m
-	}
-	// 确保 manager 持有 pool 引用（懒设置）
-	if p.reverseManager != nil && p.reverseManager.pool == nil {
-		p.reverseManager.pool = p
-	}
-}
+// initReverseManager 已废弃：Manager 在 newServerPool 中随池创建，避免懒初始化数据竞争
 
 // checkOrigin 是 WebSocket Origin 校验扩展点。
 // 当前默认保持兼容行为：允许所有来源。
@@ -275,12 +268,12 @@ func (p *serverPool) addReceivedBytes(n int) {
 // clientID 是消息来源 WebSocket 连接所属的客户端，用于在客户端各自的通道编号空间内路由。
 func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType protocol.MessageType, connID string, meta, payload []byte) {
 	p.addReceivedBytes(rawLen)
-	// 确保反向管理器已初始化
-	if p.reverseManager == nil {
-		p.initReverseManager()
-	}
-	// 反向连接拦截：优先处理反向连接表中的 connID
-	if rc := p.getReverseConn(connID); rc != nil && rc.ownerClientID == clientID {
+	// 反向连接拦截：优先处理反向连接表中的 connID（属于其他客户端的同名 connID 直接丢弃，不落入正向逻辑）
+	if rc := p.getReverseConn(connID); rc != nil {
+		if rc.ownerClientID != clientID {
+			log.Printf("[服务端] 警告: 客户端 %s 试图操作其他客户端的反向连接 %s, 忽略", protocol.ShortID(clientID), protocol.ShortID(connID))
+			return
+		}
 		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
 		return
 	}
@@ -423,18 +416,18 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		p.unregisterConn(connID)
 	}
 
-	// 清理反向连接
-	p.revMu.Lock()
+	// 清理反向连接（移出锁外调用 removeReverseConn，内部含 settle 幂等与管道关闭）
+	p.revMu.RLock()
+	var revToClose []string
 	for connID, rc := range p.revConns {
 		if rc.ownerClientID == clientID && (atomic.LoadInt32(&rc.sendCh) == int32(chID) || atomic.LoadInt32(&rc.recvCh) == int32(chID)) {
-			delete(p.revConns, connID)
-			if rc.pipe != nil {
-				_ = rc.pipe.Close()
-			}
-			close(rc.result)
+			revToClose = append(revToClose, connID)
 		}
 	}
-	p.revMu.Unlock()
+	p.revMu.RUnlock()
+	for _, connID := range revToClose {
+		p.removeReverseConn(connID)
+	}
 
 	if clientGone && p.reverseManager != nil {
 		p.reverseManager.ShutdownClient(clientID)
@@ -514,6 +507,10 @@ func (p *serverPool) unregisterConn(connID string) {
 // Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。
 // 用于服务端优雅关闭时让客户端及时感知断开，避免半开连接。
 func (p *serverPool) Shutdown() {
+	// 先关闭反向监听器，释放端口并失败化等待中的反向拨号
+	if p.reverseManager != nil {
+		p.reverseManager.Shutdown()
+	}
 	p.mu.RLock()
 	conns := make([]*ServerWSConn, 0, len(p.wsConns))
 	for _, wsConn := range p.wsConns {

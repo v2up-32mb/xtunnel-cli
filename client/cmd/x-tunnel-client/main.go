@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	xsharedrouting "github.com/v2up-32mb/xshared/routing"
 	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
-	xsharedrouting "github.com/v2up-32mb/xshared/routing"
 )
 
 func main() {
@@ -63,24 +63,24 @@ func main() {
 		log.Printf("[客户端] 反向模式：监听将由服务端按 -l 参数开启")
 	} else {
 		// 启动本地代理监听器
-	for _, addr := range listenAddrs {
-		a := addr // 创建局部变量
-		go func() {
-			var err error
-			switch {
-			case strings.HasPrefix(a, "socks5://"):
-				err = startSocks5Listener(a, c)
-			case strings.HasPrefix(a, "http://"):
-				err = startHTTPListener(a, c)
-			default:
-				err = fmt.Errorf("不支持的监听协议")
-			}
-			if err != nil {
-				// 监听失败（端口占用/协议错误）为致命错误，直接退出
-				log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
-			}
-		}()
-	}
+		for _, addr := range listenAddrs {
+			a := addr // 创建局部变量
+			go func() {
+				var err error
+				switch {
+				case strings.HasPrefix(a, "socks5://"):
+					err = startSocks5Listener(a, c)
+				case strings.HasPrefix(a, "http://"):
+					err = startHTTPListener(a, c)
+				default:
+					err = fmt.Errorf("不支持的监听协议")
+				}
+				if err != nil {
+					// 监听失败（端口占用/协议错误）为致命错误，直接退出
+					log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
+				}
+			}()
+		}
 	}
 
 	log.Printf("[客户端] 已启动,等待连接...")

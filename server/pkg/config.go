@@ -51,19 +51,19 @@ type Config struct {
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:           ":8443",
-		Token:                "",
-		AutoCert:             true,
-		ReadTimeout:          15 * time.Second,
-		WriteTimeout:         5 * time.Second,
-		PingInterval:         5 * time.Second,
-		HandshakeTimeout:     5 * time.Second,
+		ListenAddr:             ":8443",
+		Token:                  "",
+		AutoCert:               true,
+		ReadTimeout:            15 * time.Second,
+		WriteTimeout:           5 * time.Second,
+		PingInterval:           5 * time.Second,
+		HandshakeTimeout:       5 * time.Second,
 		ReadBufferSize:         64 * 1024,
 		WriteBufferSize:        64 * 1024,
 		BackpressureLimitBytes: 32 << 20, // 默认 32MB
-		MaxTotalChannels:     0,
-		MaxChannelsPerClient: 0,
-		MaxReverseListeners:  3,
+		MaxTotalChannels:       0,
+		MaxChannelsPerClient:   0,
+		MaxReverseListeners:    3,
 	}
 }
 
