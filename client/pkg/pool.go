@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/google/uuid"
 	"log"
 	"math/rand"
 	"net"
@@ -853,8 +854,26 @@ func (p *clientPool) GetUplinkChannel(connID string) (int, bool) {
 	return st.uplink, true
 }
 
-// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求
-func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string) {
+// newDialConnID 生成拨号 connID：Hot Pair 就绪时预取 Pair 并返回
+// (pair, 键.唯一后缀)；否则返回 (nil, 裸 uuid)。
+// 裸 uuid 不携带键前缀，服务端不会查预热表（广播回退安全）。
+func (p *clientPool) newDialConnID() (*HotChannelPair, string) {
+	uuidStr := uuid.New().String()
+	if p.config.EnableHotPair && p.pairWarmer != nil {
+		if pair := p.pairWarmer.AcquirePrimary(); pair != nil {
+			if pair.Key != "" {
+				return pair, common.HotPairConnID(pair.Key, uuidStr)
+			}
+			p.pairWarmer.ReleasePair(pair)
+		}
+	}
+	return nil, uuidStr
+}
+
+// RegisterAndBroadcastTCP 注册 TCP 连接并广播连接请求。
+// pair 非 nil 时（调用方已预取 Hot Pair）connID 应为键.唯一后缀，单播至 Pair 上行通道；
+// pair 为 nil 时 connID 为裸 uuid，直接走广播竞争路径。
+func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte, tcpConn net.Conn, reqType string, pair *HotChannelPair) {
 	p.mu.Lock()
 	st := p.conns[connID]
 	if st == nil {
@@ -883,32 +902,31 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	meta[0] = byte(p.config.IPStrategy)
 	copy(meta[1:], target)
 
-	// Hot Pair 路径：尝试获取主 Pair 并直接发送
-	if p.config.EnableHotPair && p.pairWarmer != nil {
-		pair := p.pairWarmer.AcquirePrimary()
-		if pair != nil {
-			p.mu.Lock()
-			st = p.conns[connID]
-			if st != nil {
-				st.pair = pair
-			}
-			p.mu.Unlock()
-			msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
-			log.Printf("[客户端] %s 使用 Hot Pair %s (TX %d RX %d) 发送首包，ID:%s", reqType, pair.ID, pair.UplinkChID, pair.DownlinkChID, common.ShortID(connID))
-			if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
-				return
-			}
-			// Hot Pair 上行通道发送失败：释放 Pair 并回退到广播，避免连接状态残留
-			log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, common.ShortID(connID))
-			p.mu.Lock()
-			if st = p.conns[connID]; st != nil {
-				st.pair = nil
-			}
-			p.mu.Unlock()
-			p.pairWarmer.ReleasePair(pair)
-			p.pairWarmer.InvalidateChannel(pair.UplinkChID)
-			// 继续走广播路径
+	// Hot Pair 路径：使用调用方预取的 Pair 单播发送（connID 已带键前缀，
+	// 支持热表的服务端可按键提升，零选路消息；旧服务端走经典路径自愈）
+	if pair != nil {
+		p.mu.Lock()
+		st = p.conns[connID]
+		if st != nil {
+			st.pair = pair
 		}
+		p.mu.Unlock()
+		msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
+		log.Printf("[客户端] %s 使用 Hot Pair %s (键:%s TX %d RX %d) 单播发送，ID:%s", reqType, pair.ID, common.ShortID(pair.Key), pair.UplinkChID, pair.DownlinkChID, common.ShortID(connID))
+		if err := p.asyncWriteDirect(pair.UplinkChID, websocket.BinaryMessage, msg); err == nil {
+			return
+		}
+		// Hot Pair 上行通道发送失败：释放 Pair 并回退到广播，避免连接状态残留。
+		// connID 保留键前缀：服务端查表不中或到达通道≠表项 ChA 时自动落回经典路径
+		log.Printf("[客户端] %s Hot Pair 上行通道 %d 发送失败，回退广播，ID:%s", reqType, pair.UplinkChID, common.ShortID(connID))
+		p.mu.Lock()
+		if st = p.conns[connID]; st != nil {
+			st.pair = nil
+		}
+		p.mu.Unlock()
+		p.pairWarmer.ReleasePair(pair)
+		p.pairWarmer.InvalidateChannel(pair.UplinkChID)
+		// 继续走广播路径
 	}
 
 	msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
@@ -1301,8 +1319,9 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				binary.BigEndian.PutUint32(downlinkBytes, uint32(chosen))
 				_ = p.asyncWriteDirect(uplinkChID, websocket.BinaryMessage, common.EncodeMessage(common.MsgSelectDownlink, connID, downlinkBytes, nil))
 
-				// 如果是预绑定请求，通知 PairWarmer 完成 Pair 构建
-				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") {
+				// 如果是预绑定请求（裸键 connID，无拨号后缀），通知 PairWarmer 完成 Pair 构建；
+				// 带后缀的拨号 connID 前缀相同但已脱离预热流程，不在此列
+				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".") {
 					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}

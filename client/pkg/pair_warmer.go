@@ -21,7 +21,8 @@ const (
 
 // HotChannelPair 表示一个热通道对
 type HotChannelPair struct {
-	ID           string
+	ID           string // 槽位号（"01".."08"，日志用，稳定复用）
+	Key          string // 预热 Pair 键（预热期 prebind connID，随 MsgHotPairNotify 通知服务端；拨号 connID 前缀）
 	UplinkChID   int
 	DownlinkChID int
 	state        int32
@@ -55,7 +56,14 @@ type PairWarmer struct {
 	cancel  context.CancelFunc
 
 	prebindResultCh chan prebindResult
+
+	notifyMu      sync.Mutex
+	notifyPending map[string]common.HotPairInfo // Key → 待通知记录（按键去重）
+	notifyTimer   *time.Timer
 }
+
+// hotPairNotifyDebounce 新 Pair 通知的合批窗口
+const hotPairNotifyDebounce = 500 * time.Millisecond
 
 // prebindResult 预绑定结果
 type prebindResult struct {
@@ -78,6 +86,7 @@ func NewPairWarmer(pool *clientPool, cfg *Config) *PairWarmer {
 		ctx:             ctx,
 		cancel:          cancel,
 		prebindResultCh: make(chan prebindResult, 8),
+		notifyPending:   make(map[string]common.HotPairInfo),
 	}
 }
 
@@ -304,6 +313,8 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 					return nil, fmt.Errorf("PairWarmer 已关闭")
 				}
 				pair := &HotChannelPair{
+					ID:           "",
+					Key:          connID, // 预热期 connID 作为 Pair 稳定键（拨号前缀 + 通知键）
 					UplinkChID:   res.uplinkChID,
 					DownlinkChID: res.downlinkChID,
 					state:        int32(PairStateReady),
@@ -318,6 +329,8 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 				w.mu.Unlock()
 				// 预绑定成功，清理临时连接状态
 				w.deletePrebindState(connID)
+				// 通知服务端建热表（合批去重；旧服务端无此 case 自动忽略）
+				w.queueHotPairNotify(pair)
 				if wasPrimary == nil {
 					log.Printf("[PairWarmer] 首次构建 Pair (上行: %d, 下行: %d)，设为 primary（ID 待分配）", pair.UplinkChID, pair.DownlinkChID)
 				} else {
@@ -567,6 +580,9 @@ func (w *PairWarmer) tryRefresh() {
 // 在多 Pair 模式下，会将最老的 Ready Pair 标记为 Draining 并重建，
 // 从而持续验证通道质量并避免 Pair 长期不变。
 func (w *PairWarmer) periodicRefresh() {
+	// 周期心跳：对存量 Ready Pair 重发通知，刷新服务端表项时间戳（防 TTL 过期误清健康 Pair）
+	w.heartbeatHotPairNotify()
+
 	// 清理历史版本遗留的 refs=0 的 Draining Pair，避免列表无限膨胀
 	w.pruneIdleDrainingPairs()
 
@@ -695,4 +711,91 @@ func (w *PairWarmer) periodicRefresh() {
 	if newPrimaryID != "" && newPrimaryID != primaryID {
 		log.Printf("[PairWarmer] primary 已切换: %s -> %s", primaryID, newPrimaryID)
 	}
+}
+
+// queueHotPairNotify 将 Ready Pair 加入待通知队列（按键去重，500ms 合批后发送）。
+// 键为预热期 prebind connID；Key 为空的 Pair（理论不可达）跳过。
+func (w *PairWarmer) queueHotPairNotify(pair *HotChannelPair) {
+	if pair == nil || pair.Key == "" {
+		return
+	}
+	w.notifyMu.Lock()
+	w.notifyPending[pair.Key] = common.HotPairInfo{
+		Key: pair.Key,
+		ChA: pair.UplinkChID,
+		ChB: pair.DownlinkChID,
+	}
+	if w.notifyTimer == nil {
+		w.notifyTimer = time.AfterFunc(hotPairNotifyDebounce, w.flushHotPairNotify)
+	}
+	w.notifyMu.Unlock()
+}
+
+// flushHotPairNotify 把待通知记录编码为一帧 MsgHotPairNotify 发给服务端。
+// 发送前过滤已失效的 Pair；全部通道发送失败时保留队列等待下次重试。
+func (w *PairWarmer) flushHotPairNotify() {
+	w.notifyMu.Lock()
+	w.notifyTimer = nil
+	if len(w.notifyPending) == 0 {
+		w.notifyMu.Unlock()
+		return
+	}
+	pending := make([]common.HotPairInfo, 0, len(w.notifyPending))
+	for key, info := range w.notifyPending {
+		w.mu.RLock()
+		alive := w.lookupReadyByKey(key) != nil
+		w.mu.RUnlock()
+		if !alive {
+			// Pair 已失效：丢弃通知
+			delete(w.notifyPending, key)
+			continue
+		}
+		pending = append(pending, info)
+	}
+	if len(pending) == 0 {
+		w.notifyMu.Unlock()
+		return
+	}
+	w.notifyMu.Unlock()
+
+	msg := common.EncodeMessage(common.MsgHotPairNotify, "", nil, common.EncodeHotPairNotify(pending))
+	for _, chID := range w.pool.availableChannels() {
+		if err := w.pool.asyncWriteDirect(chID, websocket.BinaryMessage, msg); err == nil {
+			// 发送成功：清除已通知记录
+			w.notifyMu.Lock()
+			for _, info := range pending {
+				delete(w.notifyPending, info.Key)
+			}
+			w.notifyMu.Unlock()
+			log.Printf("[PairWarmer] 预热通道对已通知服务端 (%d 条)", len(pending))
+			return
+		}
+	}
+	log.Printf("[PairWarmer] 预热通道对通知发送失败，等待重试 (%d 条)", len(pending))
+}
+
+// heartbeatHotPairNotify 周期心跳：对存量 Ready Pair 重发通知，
+// 刷新服务端表项时间戳（防 TTL 过期误清健康 Pair）。
+func (w *PairWarmer) heartbeatHotPairNotify() {
+	w.mu.RLock()
+	ready := make([]*HotChannelPair, 0, len(w.pairs))
+	for _, pair := range w.pairs {
+		if pair.State() == PairStateReady {
+			ready = append(ready, pair)
+		}
+	}
+	w.mu.RUnlock()
+	for _, pair := range ready {
+		w.queueHotPairNotify(pair)
+	}
+}
+
+// lookupReadyByKey 按 Pair 键查找 Ready 状态的 Pair（flush 过滤与测试用，调用方需持有 mu）
+func (w *PairWarmer) lookupReadyByKey(key string) *HotChannelPair {
+	for _, pair := range w.pairs {
+		if pair.Key == key && pair.State() == PairStateReady {
+			return pair
+		}
+	}
+	return nil
 }

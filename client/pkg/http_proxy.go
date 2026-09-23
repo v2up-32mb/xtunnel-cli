@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"x-tunnel/common"
 )
@@ -119,8 +118,9 @@ func (p *clientPool) handleHTTPProxyForward(c net.Conn, reader *bufio.Reader, ta
 }
 
 func (p *clientPool) waitForHTTPProxyTarget(c net.Conn, target string, reqType string) (string, bool) {
-	connID := uuid.New().String()
-	p.RegisterAndBroadcastTCP(connID, target, nil, c, reqType)
+	// Hot Pair 就绪时 connID = 键.唯一后缀（服务端可按键提升）；否则裸 uuid
+	pair, connID := p.newDialConnID()
+	p.RegisterAndBroadcastTCP(connID, target, nil, c, reqType, pair)
 
 	p.mu.RLock()
 	st := p.conns[connID]

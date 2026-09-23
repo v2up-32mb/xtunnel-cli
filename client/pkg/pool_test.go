@@ -357,7 +357,6 @@ func TestClientPoolHasChannelNotificationChannels(t *testing.T) {
 	}
 }
 
-
 func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 	type requestInfo struct {
 		clientID string
@@ -423,7 +422,6 @@ func TestDialWebSocketIncludesStableClientID(t *testing.T) {
 		t.Fatalf("second ch_id = %q, want 2", second.chID)
 	}
 }
-
 
 func TestDialAndServeStopsPromptlyWhenCancelledDuringReconnectDelay(t *testing.T) {
 	connected := make(chan struct{}, 1)

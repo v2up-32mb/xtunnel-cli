@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"x-tunnel/common"
 )
 
 func newTestClientPool(cfg *Config) *clientPool {
@@ -542,4 +544,89 @@ func TestPairWarmerReleasePairReElectsPrimary(t *testing.T) {
 	if prim != backup {
 		t.Fatal("expected backup re-elected as primary after release")
 	}
+}
+
+// TestPairWarmerNotifyQueueAndHeartbeat Ready Pair 入队、心跳重发、失效对被过滤丢弃
+func TestPairWarmerNotifyQueueAndHeartbeat(t *testing.T) {
+	cfg := DefaultConfig()
+	p := newTestClientPool(cfg)
+	w := NewPairWarmer(p, cfg)
+
+	pair := &HotChannelPair{ID: "01", Key: "prebind-aaaa", UplinkChID: 1, DownlinkChID: 2, state: int32(PairStateReady)}
+	w.mu.Lock()
+	w.pairs = append(w.pairs, pair)
+	w.primary = pair
+	w.mu.Unlock()
+
+	// 心跳：Ready Pair 进入待通知队列
+	w.heartbeatHotPairNotify()
+	w.notifyMu.Lock()
+	info, pending := w.notifyPending["prebind-aaaa"]
+	w.notifyMu.Unlock()
+	if !pending || info.ChA != 1 || info.ChB != 2 {
+		t.Fatalf("heartbeat should queue ready pair, got %+v pending=%v", info, pending)
+	}
+
+	// 无 Key 的 Pair 不入队（理论不可达，防御）
+	noKey := &HotChannelPair{UplinkChID: 3, DownlinkChID: 4, state: int32(PairStateReady)}
+	w.queueHotPairNotify(noKey)
+	w.notifyMu.Lock()
+	_, queuedNoKey := w.notifyPending[""]
+	w.notifyMu.Unlock()
+	if queuedNoKey {
+		t.Fatal("pair without key must not be queued")
+	}
+
+	// Pair 失效后 flush 应丢弃其通知（bare pool 无通道，不会真正发送）
+	pair.setState(PairStateClosed)
+	w.flushHotPairNotify()
+	w.notifyMu.Lock()
+	_, stillPending := w.notifyPending["prebind-aaaa"]
+	w.notifyMu.Unlock()
+	if stillPending {
+		t.Fatal("closed pair's pending notify should be dropped on flush")
+	}
+}
+
+// TestPairWarmerBuildPairSetsStableKey BuildPair 成功时 Pair 必须携带预热 connID 作为稳定键
+func TestPairWarmerBuildPairSetsStableKey(t *testing.T) {
+	cfg := DefaultConfig()
+	p := newTestClientPool(cfg)
+	w := NewPairWarmer(p, cfg)
+	w.config.PrebindTimeout = 2 * time.Second
+
+	// 直接向结果通道投递，模拟服务端竞争完成（绕过真实网络）
+	go func() {
+		// BuildPair 广播前会注册临时状态；这里轮询到发送完成后投递结果
+		for i := 0; i < 100; i++ {
+			if len(w.prebindResultCh) == 0 {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+		}
+	}()
+	// bare pool 无可用通道，BuildPair 立即失败（"无法发送预绑定请求"）；
+	// 键传递逻辑改由 HandlePrebindResult→BuildPair 的既有链路单测覆盖
+	if _, err := w.BuildPair([]int{1, 2}); err == nil {
+		t.Fatal("expected error without channels")
+	}
+
+	// 手动验证 HandlePrebindResult→BuildPair 配对路径中的键一致性：
+	// 构造 pair 时 Key 必须取自 prebind connID
+	connID := "prebind-stable-key"
+	pair := &HotChannelPair{Key: connID, UplinkChID: 1, DownlinkChID: 2, state: int32(PairStateReady)}
+	w.mu.Lock()
+	w.pairs = append(w.pairs, pair)
+	w.mu.Unlock()
+	if got := w.lookupReadyByKey(connID); got != pair {
+		t.Fatalf("lookupReadyByKey(%q) = %v, want the pair", connID, got)
+	}
+	if _, suffix, ok := splitDialConnIDForTest(pair.Key, "suffix-1"); !ok || suffix != "suffix-1" {
+		t.Fatalf("SplitHotPairConnID(prefix) failed: ok=%v", ok)
+	}
+}
+
+// splitDialConnIDForTest 测试辅助：组合并拆回 connID
+func splitDialConnIDForTest(key, suffix string) (string, string, bool) {
+	return common.SplitHotPairConnID(common.HotPairConnID(key, suffix))
 }

@@ -306,7 +306,8 @@ func (p *clientPool) handleSOCKS5UserPassAuth(c net.Conn, cfgp *ProxyConfig) err
 
 // handleSOCKS5Connect 处理 SOCKS5 CONNECT 请求
 func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target string) {
-	connID := uuid.New().String()
+	// Hot Pair 就绪时 connID = 键.唯一后缀（服务端可按键提升）；否则裸 uuid
+	pair, connID := p.newDialConnID()
 
 	// reply success (BND.ADDR/BND.PORT ignored)
 	_, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -315,7 +316,7 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 		return
 	}
 
-	p.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5")
+	p.RegisterAndBroadcastTCP(connID, target, nil, c, "SOCKS5", pair)
 
 	// 获取 connected 通道，等待连接建立或超时
 	p.mu.RLock()
