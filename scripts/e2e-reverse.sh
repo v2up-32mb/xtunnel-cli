@@ -152,6 +152,57 @@ else
   echo "[e2e] WARNING: server log shutdown message not clear"
 fi
 
+# 8. hotpair phase: restart server with -hotpair and re-verify data path via prewarmed pair
+echo "[e2e] === hotpair phase ==="
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+sleep 1
+
+SERVER_LOG_HP="$TMPDIR/server-hotpair.log"
+nohup "$SERVER_BIN" -l 127.0.0.1:"$WS_PORT" -token e2e-token -hotpair >"$SERVER_LOG_HP" 2>&1 &
+SERVER_PID=$!
+
+for i in $(seq 1 30); do
+  if curl -k -s https://127.0.0.1:"$WS_PORT" -o /dev/null -w "%{http_code}" 2>/dev/null | grep -q 400; then
+    break
+  fi
+  sleep 1
+done
+
+CLIENT_LOG_HP="$TMPDIR/client-hotpair.log"
+nohup "$CLIENT_BIN" -f wss://127.0.0.1:"$WS_PORT" -token e2e-token -insecure -n 2 -r -l "socks5://127.0.0.1:$SOCKS_PORT" >"$CLIENT_LOG_HP" 2>&1 &
+CLIENT_PID=$!
+
+if ! wait_for "反向监听已注册" "$CLIENT_LOG_HP" 30; then
+  echo "[e2e] ERROR: hotpair phase client never registered"
+  exit 1
+fi
+
+if ! wait_for "Pair 构建完成" "$SERVER_LOG_HP" 30; then
+  echo "[e2e] ERROR: ReversePairWarmer never built a pair"
+  echo "--- server log ---"
+  tail -n 200 "$SERVER_LOG_HP"
+  exit 1
+fi
+echo "[e2e] ASSERT PASS: prewarmed pair built"
+
+sleep 1  # 留出预热 Pair 就绪窗口，让下一次 curl 走单播快路径
+TMP_OUT_HP="$TMPDIR/curl-hotpair.out"
+if ! curl --socks5-hostname 127.0.0.1:"$SOCKS_PORT" --max-time 15 "http://127.0.0.1:$HTTP_PORT/" -o "$TMP_OUT_HP" -s; then
+  echo "[e2e] ERROR: hotpair phase curl failed"
+  echo "--- server log ---"
+  tail -n 200 "$SERVER_LOG_HP"
+  exit 1
+fi
+
+if grep -q "$MARKER" "$TMP_OUT_HP"; then
+  echo "[e2e] ASSERT PASS: hotpair phase curl via socks returns marker"
+else
+  echo "[e2e] ERROR: marker not found in hotpair curl output"
+  cat "$TMP_OUT_HP"
+  exit 1
+fi
+
 echo "[e2e] ALL ASSERTIONS PASSED"
 echo "=== key logs ==="
 echo "--- client last 50 lines ---"
