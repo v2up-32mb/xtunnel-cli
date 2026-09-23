@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"time"
 	"os"
 	"os/signal"
 	"syscall"
@@ -61,6 +62,9 @@ var (
 	maxChannelsPerClient   int
 	backpressureLimitBytes int
 	maxReverseListeners    int
+	hotPair                bool
+	hotPairCount           int
+	hotPairRefreshInterval time.Duration
 )
 
 func parseFlags() *server.Config {

@@ -55,6 +55,9 @@ type serverPool struct {
 	// 反向监听管理器
 	reverseManager *ReverseListenerManager
 
+	// 反向预热器（-hotpair 启用）
+	reversePairWarmer *ReversePairWarmer
+
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
 	globalQueueLimit     int64 // 全局队列字节限制
@@ -80,7 +83,17 @@ func newServerPool(token string, config *Config) *serverPool {
 	}
 	p.reverseManager = NewReverseListenerManager(config.MaxReverseListeners)
 	p.reverseManager.pool = p
+	if config.EnableHotPair {
+		p.reversePairWarmer = NewReversePairWarmer(p, config.HotPairCount, config.HotPairRefreshInterval)
+	}
 	return p
+}
+
+// startReversePairWarmer 启动反向预热循环（幂等；仅 -hotpair 启用时生效）
+func (p *serverPool) startReversePairWarmer() {
+	if p.reversePairWarmer != nil {
+		p.reversePairWarmer.Start()
+	}
 }
 
 // initReverseManager 已废弃：Manager 在 newServerPool 中随池创建，避免懒初始化数据竞争
@@ -277,6 +290,11 @@ func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgTyp
 		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
 		return
 	}
+	// 反向预热：预绑定回包（仅反向模式会收到 MsgSelectUplink，正向是服务端下发方向）
+	if p.reversePairWarmer != nil && isReversePrebindConnID(connID) && msgType == protocol.MsgSelectUplink {
+		p.reversePairWarmer.HandlePrebindUplink(clientID, chID, connID, meta)
+		return
+	}
 	switch msgType {
 	case protocol.MsgReverseListen:
 		p.reverseManager.HandleReverseListen(clientID, chID, connID, meta)
@@ -429,6 +447,13 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		p.removeReverseConn(connID)
 	}
 
+	if p.reversePairWarmer != nil {
+		if clientGone {
+			p.reversePairWarmer.InvalidateClient(clientID)
+		} else {
+			p.reversePairWarmer.InvalidateChannel(chID)
+		}
+	}
 	if clientGone && p.reverseManager != nil {
 		p.reverseManager.ShutdownClient(clientID)
 	}
@@ -510,6 +535,9 @@ func (p *serverPool) Shutdown() {
 	// 先关闭反向监听器，释放端口并失败化等待中的反向拨号
 	if p.reverseManager != nil {
 		p.reverseManager.Shutdown()
+	}
+	if p.reversePairWarmer != nil {
+		p.reversePairWarmer.Stop()
 	}
 	p.mu.RLock()
 	conns := make([]*ServerWSConn, 0, len(p.wsConns))

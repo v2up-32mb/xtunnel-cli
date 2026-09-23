@@ -46,6 +46,11 @@ type Config struct {
 
 	// 反向监听限制
 	MaxReverseListeners int // 每客户端最大反向监听器数，默认 3
+
+	// 反向预热（-hotpair）：语义同客户端正向 Hot Pair
+	EnableHotPair          bool          // 启用反向预热 Pair，默认关闭
+	HotPairCount           int           // 每客户端预热 Pair 数，默认 1
+	HotPairRefreshInterval time.Duration // 预热刷新间隔，默认 30s
 }
 
 // DefaultConfig 返回带有合理默认值的配置
@@ -64,6 +69,9 @@ func DefaultConfig() *Config {
 		MaxTotalChannels:       0,
 		MaxChannelsPerClient:   0,
 		MaxReverseListeners:    3,
+		EnableHotPair:          false,
+		HotPairCount:           1,
+		HotPairRefreshInterval: 30 * time.Second,
 	}
 }
 

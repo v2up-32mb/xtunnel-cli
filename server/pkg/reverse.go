@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"sync/atomic"
 	"time"
@@ -77,13 +78,35 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 	d.pool.revConns[connID] = rc
 	d.pool.revMu.Unlock()
 
-	// 广播拨号请求（含目标）
 	meta := make([]byte, 1+len(target))
 	meta[0] = byte(protocol.IPStrategyDefault)
 	copy(meta[1:], []byte(target))
-	if err := d.pool.broadcastWriteToClient(d.clientID, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)); err != nil {
-		d.pool.removeReverseConn(connID)
-		return nil, fmt.Errorf("无可用客户端通道")
+	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)
+
+	// Hot Pair 路径：预热 Pair 就绪则单播直达，免广播竞争（镜像正向 RegisterAndBroadcastTCP）
+	var pair *ReverseHotPair
+	if d.pool.reversePairWarmer != nil {
+		pair = d.pool.reversePairWarmer.AcquirePair(d.clientID)
+	}
+	if pair != nil {
+		atomic.StoreInt32(&rc.sendCh, int32(pair.P1))
+		atomic.StoreInt32(&rc.recvCh, int32(pair.P2))
+		if err := d.pool.sendToChannel(d.clientID, pair.P1, websocket.BinaryMessage, msg); err != nil {
+			// Pair 通道已失效：废弃该通道全部 Pair 并回退广播竞争
+			log.Printf("[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", pair.P1, err)
+			d.pool.reversePairWarmer.InvalidateChannel(pair.P1)
+			pair = nil
+		} else {
+			downMeta := make([]byte, 4)
+			binary.BigEndian.PutUint32(downMeta, uint32(pair.P2))
+			_ = d.pool.sendToChannel(d.clientID, pair.P1, websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
+		}
+	}
+	if pair == nil {
+		if err := d.pool.broadcastWriteToClient(d.clientID, websocket.BinaryMessage, msg); err != nil {
+			d.pool.removeReverseConn(connID)
+			return nil, fmt.Errorf("无可用客户端通道")
+		}
 	}
 
 	// 上行泵：应用侧 → 隧道（P1 已知则单播，否则广播）

@@ -98,6 +98,9 @@ func (s *Server) Start() error {
 		}
 	}()
 
+	// 启动反向预热循环（-hotpair 启用时）
+	s.pool.startReversePairWarmer()
+
 	s.started = true
 	log.Printf("[服务端] 已启动")
 	return nil
