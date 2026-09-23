@@ -147,6 +147,8 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 ### HotPair 预热路径（-hotpair 启用时）
 
 正向现状：`-hotpair` 时代理请求到达**不走广播竞争**——`AcquirePrimary()` 取 Ready 状态预热 Pair，`MsgTCPConnect` 单播到 `pair.UplinkChID`（首帧 ≈ 1 RTT）；`selectDownlink` 直接 CAS 采用预绑定 `pair.DownlinkChID`。竞争被 PairWarmer 后台提前执行：循环广播 `MsgPrebindRequest`（connID=`prebind-<uuid>`，target=`x-tunnel.prebind`）→ 服务端首达占用、回 `MsgSelectUplink`、立即注销不拨号 → 客户端竞争收包确定 RX → Pair `{TX,RX}` Ready。兜底：无 Ready Pair 或单播发送失败 → 回退广播+竞争并废弃该通道。
+注：拨号期的 `MsgSelectUplink` 广播与 `MsgSelectDownlink` 应答与目标拨号**并行**，无首字节延迟损失，仅少量控制帧。
+**为何正向不做 connID 复用（回归教训，曾实测 8 路并发仅 2 路成功）**：正向 Pair 为**共享复用**（`AcquirePrimary` 引用计数，多连接同用一对通道），连接 connID 必须每连接唯一——复用 prebind connID 会导致并发连接互相覆盖、被服务端当重复请求丢弃。反向能复用 prebind connID 是因为其 Pair **一次性消费**（`AcquirePair` 弹出），每连接独占，connID 天然唯一。
 
 反向按对称镜像在**服务端**实现 ReversePairWarmer（回程竞争 P2 只有请求方能做，故 Warmer 必须在服务端，客户端无法代劳）：
 
