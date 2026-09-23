@@ -11,7 +11,7 @@ import (
 // TestBackpressureGradualRecovery 测试分级恢复机制
 func TestBackpressureGradualRecovery(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ReadBufferSize = 100        // 100 bytes
+	cfg.ReadBufferSize = 100         // 100 bytes
 	cfg.BackpressureLimitBytes = 800 // 测试中显式设置限制为 800 bytes
 	pool := newServerPool("test-token", cfg)
 

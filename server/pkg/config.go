@@ -43,23 +43,27 @@ type Config struct {
 	// 接入限制
 	MaxTotalChannels     int // 最大总通道数（0 表示无限制）
 	MaxChannelsPerClient int // 每个客户端最大通道数（0 表示无限制）
+
+	// 反向监听限制
+	MaxReverseListeners int // 每客户端最大反向监听器数，默认 3
 }
 
 // DefaultConfig 返回带有合理默认值的配置
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:           ":8443",
-		Token:                "",
-		AutoCert:             true,
-		ReadTimeout:          15 * time.Second,
-		WriteTimeout:         5 * time.Second,
-		PingInterval:         5 * time.Second,
-		HandshakeTimeout:     5 * time.Second,
+		ListenAddr:             ":8443",
+		Token:                  "",
+		AutoCert:               true,
+		ReadTimeout:            15 * time.Second,
+		WriteTimeout:           5 * time.Second,
+		PingInterval:           5 * time.Second,
+		HandshakeTimeout:       5 * time.Second,
 		ReadBufferSize:         64 * 1024,
 		WriteBufferSize:        64 * 1024,
 		BackpressureLimitBytes: 32 << 20, // 默认 32MB
-		MaxTotalChannels:     0,
-		MaxChannelsPerClient: 0,
+		MaxTotalChannels:       0,
+		MaxChannelsPerClient:   0,
+		MaxReverseListeners:    3,
 	}
 }
 

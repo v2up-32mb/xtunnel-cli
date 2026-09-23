@@ -48,6 +48,16 @@ type serverPool struct {
 	// 不会互相占用/拒绝（协议路由始终能通过 conn 状态或来源连接定位客户端）。
 	clientChConns map[string]map[int]*ServerWSConn
 
+	// 反向连接状态
+	revMu    sync.RWMutex
+	revConns map[string]*ServerReverseConn
+
+	// 反向监听管理器
+	reverseManager *ReverseListenerManager
+
+	// 预热通道对表（被动）：健康维护由客户端负责，经 MsgHotPairNotify 通知存储
+	hotPairs *HotPairTable
+
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
 	globalQueueLimit     int64 // 全局队列字节限制
@@ -61,16 +71,24 @@ func newServerPool(token string, config *Config) *serverPool {
 	if limit <= 0 {
 		limit = 32 << 20 // 默认 32MB
 	}
-	return &serverPool{
+	p := &serverPool{
 		config:            config,
 		token:             token,
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
+		revConns:          make(map[string]*ServerReverseConn),
 		globalQueueLimit:  limit,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
+	p.reverseManager = NewReverseListenerManager(config.MaxReverseListeners)
+	p.reverseManager.pool = p
+	// 预热通道对表：被动接收客户端 MsgHotPairNotify，正向提升与反向热拨号共用
+	p.hotPairs = NewHotPairTable()
+	return p
 }
+
+// initReverseManager 已废弃：Manager 在 newServerPool 中随池创建，避免懒初始化数据竞争
 
 // checkOrigin 是 WebSocket Origin 校验扩展点。
 // 当前默认保持兼容行为：允许所有来源。
@@ -213,6 +231,26 @@ func (p *serverPool) countActiveChannelsLocked(clientID string) (total int, clie
 	return
 }
 
+func (p *serverPool) countActiveChannelsForClient(clientID string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	cnt := 0
+	for _, wsConn := range p.wsConns {
+		if wsConn != nil && !wsConn.closed && wsConn.clientID == clientID {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+// channelAliveForClient 指定客户端的指定通道是否活跃（预热表项使用前校验）
+func (p *serverPool) channelAliveForClient(clientID string, chID int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	wsConn := p.clientChConns[clientID][chID]
+	return wsConn != nil && !wsConn.closed
+}
+
 func (p *serverPool) connectTimeout() time.Duration {
 	if p == nil || p.config == nil || p.config.HandshakeTimeout <= 0 {
 		return 10 * time.Second
@@ -243,7 +281,24 @@ func (p *serverPool) addReceivedBytes(n int) {
 // clientID 是消息来源 WebSocket 连接所属的客户端，用于在客户端各自的通道编号空间内路由。
 func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgType protocol.MessageType, connID string, meta, payload []byte) {
 	p.addReceivedBytes(rawLen)
+	// 反向连接拦截：优先处理反向连接表中的 connID（属于其他客户端的同名 connID 直接丢弃，不落入正向逻辑）
+	if rc := p.getReverseConn(connID); rc != nil {
+		if rc.ownerClientID != clientID {
+			log.Printf("[服务端] 警告: 客户端 %s 试图操作其他客户端的反向连接 %s, 忽略", protocol.ShortID(clientID), protocol.ShortID(connID))
+			return
+		}
+		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
+		return
+	}
+	// 预热通道对：收到客户端批量预热通知（健康维护由客户端负责）
+	if p.hotPairs != nil && msgType == protocol.MsgHotPairNotify {
+		p.hotPairs.HandleNotify(clientID, payload)
+		return
+	}
 	switch msgType {
+	case protocol.MsgReverseListen:
+		p.reverseManager.HandleReverseListen(clientID, chID, connID, meta)
+		return
 	case protocol.MsgTCPConnect:
 		p.handleTCPConnect(clientID, chID, connID, meta)
 
@@ -342,6 +397,7 @@ func (p *serverPool) sendToChannel(clientID string, chID int, msgType int, data 
 
 // cleanupChannel 清理指定客户端的通道
 func (p *serverPool) cleanupChannel(clientID string, chID int) {
+	var clientGone bool
 	p.mu.Lock()
 
 	var wsConn *ServerWSConn
@@ -350,6 +406,7 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		delete(m, chID)
 		if len(m) == 0 {
 			delete(p.clientChConns, clientID)
+			clientGone = true
 		}
 	}
 	for i, wc := range p.wsConns {
@@ -375,6 +432,30 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 
 	for _, connID := range toClose {
 		p.unregisterConn(connID)
+	}
+
+	// 清理反向连接（移出锁外调用 removeReverseConn，内部含 settle 幂等与管道关闭）
+	p.revMu.RLock()
+	var revToClose []string
+	for connID, rc := range p.revConns {
+		if rc.ownerClientID == clientID && (atomic.LoadInt32(&rc.sendCh) == int32(chID) || atomic.LoadInt32(&rc.recvCh) == int32(chID)) {
+			revToClose = append(revToClose, connID)
+		}
+	}
+	p.revMu.RUnlock()
+	for _, connID := range revToClose {
+		p.removeReverseConn(connID)
+	}
+
+	if p.hotPairs != nil {
+		if clientGone {
+			p.hotPairs.InvalidateClient(clientID)
+		} else {
+			p.hotPairs.InvalidateChannel(chID)
+		}
+	}
+	if clientGone && p.reverseManager != nil {
+		p.reverseManager.ShutdownClient(clientID)
 	}
 
 	if wsConn != nil {
@@ -451,6 +532,10 @@ func (p *serverPool) unregisterConn(connID string) {
 // Shutdown 主动关闭所有活跃 WebSocket 通道，向客户端发送 Close Frame。
 // 用于服务端优雅关闭时让客户端及时感知断开，避免半开连接。
 func (p *serverPool) Shutdown() {
+	// 先关闭反向监听器，释放端口并失败化等待中的反向拨号
+	if p.reverseManager != nil {
+		p.reverseManager.Shutdown()
+	}
 	p.mu.RLock()
 	conns := make([]*ServerWSConn, 0, len(p.wsConns))
 	for _, wsConn := range p.wsConns {

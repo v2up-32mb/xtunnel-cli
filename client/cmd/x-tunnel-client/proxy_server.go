@@ -1,10 +1,10 @@
 package main
 
 import (
-	"github.com/v2up-32mb/xtunnel"
 	xsharedconfig "github.com/v2up-32mb/xshared/config"
 	xsharedhttpproxy "github.com/v2up-32mb/xshared/httpproxy"
 	xsharedsocks5 "github.com/v2up-32mb/xshared/socks5"
+	"github.com/v2up-32mb/xtunnel"
 )
 
 // startSocks5Listener 以共享 SOCKS5 服务器承接本地监听。

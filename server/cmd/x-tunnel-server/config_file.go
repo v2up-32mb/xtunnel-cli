@@ -14,6 +14,7 @@ type serverFileConfig struct {
 	MaxTotalChannels       *int    `json:"max_total_channels"`
 	MaxChannelsPerClient   *int    `json:"max_channels_per_client"`
 	BackpressureLimitBytes *int    `json:"backpressure_limit_bytes"`
+	MaxReverseListeners    *int    `json:"max_reverse_listeners"`
 }
 
 func visitedFlags() map[string]bool {
@@ -59,6 +60,9 @@ func applyServerFileConfig(path string, provided map[string]bool) error {
 	}
 	if cfg.BackpressureLimitBytes != nil && !provided["backpressure-limit"] {
 		backpressureLimitBytes = *cfg.BackpressureLimitBytes
+	}
+	if cfg.MaxReverseListeners != nil && !provided["max-reverse-listeners"] {
+		maxReverseListeners = *cfg.MaxReverseListeners
 	}
 
 	return nil

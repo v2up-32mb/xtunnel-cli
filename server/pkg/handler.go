@@ -47,12 +47,28 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 			st.clientAddr = wsConn.remoteAddr
 		}
 
-		// 发送 MsgSelectUplink（广播）,携带上行通道ID
+		// 发送 MsgSelectUplink（广播）携带上行通道 ID；预热热路径（connID 携带
+		// Pair 键前缀且到达通道与表项发包方向一致）预置下行通道，跳过选路帧，
+		// 客户端按前缀查表直接获得完整收发通道，拨号期零选路消息
 		uplinkChIDBytes := make([]byte, 4)
 		binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
-		_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
-
-		log.Printf("[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
+		promoted := false
+		if p.hotPairs != nil {
+			if key, _, ok := protocol.SplitHotPairConnID(connID); ok {
+				if e := p.hotPairs.Lookup(clientID, key); e != nil && e.ChA == chID && p.channelAliveForClient(clientID, e.ChB) {
+					st.mu.Lock()
+					st.downlinkChID = e.ChB
+					st.mu.Unlock()
+					promoted = true
+					log.Printf("[服务端] %s 访问: %s, 通道: TX %d RX %d (预热 Pair 提升, 键:%s), ID:%s",
+						st.clientAddr, target, chID, e.ChB, protocol.ShortID(e.Key), protocol.ShortID(connID))
+				}
+			}
+		}
+		if !promoted {
+			_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
+			log.Printf("[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
+		}
 
 		// 异步连接目标服务器
 		go p.connectTarget(st)

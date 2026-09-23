@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	xsharedrouting "github.com/v2up-32mb/xshared/routing"
 	"github.com/v2up-32mb/xtunnel"
 	"github.com/v2up-32mb/xtunnel/protocol"
-	xsharedrouting "github.com/v2up-32mb/xshared/routing"
 )
 
 func main() {
@@ -59,24 +59,28 @@ func main() {
 	}
 	defer c.Shutdown()
 
-	// 启动本地代理监听器
-	for _, addr := range listenAddrs {
-		a := addr // 创建局部变量
-		go func() {
-			var err error
-			switch {
-			case strings.HasPrefix(a, "socks5://"):
-				err = startSocks5Listener(a, c)
-			case strings.HasPrefix(a, "http://"):
-				err = startHTTPListener(a, c)
-			default:
-				err = fmt.Errorf("不支持的监听协议")
-			}
-			if err != nil {
-				// 监听失败（端口占用/协议错误）为致命错误，直接退出
-				log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
-			}
-		}()
+	if reverseMode {
+		log.Printf("[客户端] 反向模式：监听将由服务端按 -l 参数开启")
+	} else {
+		// 启动本地代理监听器
+		for _, addr := range listenAddrs {
+			a := addr // 创建局部变量
+			go func() {
+				var err error
+				switch {
+				case strings.HasPrefix(a, "socks5://"):
+					err = startSocks5Listener(a, c)
+				case strings.HasPrefix(a, "http://"):
+					err = startHTTPListener(a, c)
+				default:
+					err = fmt.Errorf("不支持的监听协议")
+				}
+				if err != nil {
+					// 监听失败（端口占用/协议错误）为致命错误，直接退出
+					log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
+				}
+			}()
+		}
 	}
 
 	log.Printf("[客户端] 已启动,等待连接...")
@@ -107,7 +111,7 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&maxSOCKS5Connections, "max-socks5-conns", 1024, "SOCKS5 最大并发连接数，0 表示无限制")
 	fs.DurationVar(&connectTimeout, "connect-timeout", 15*time.Second, "本地代理等待远端建链超时")
 	fs.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
-	fs.BoolVar(&enableHotPair, "hotpair", false, "启用 Hot Channel Pair 降低首帧延迟")
+	fs.BoolVar(&enableHotPair, "hotpair", false, "启用 Hot Channel Pair 降低首帧延迟（正向=本地预热；反向=通知服务端预热）")
 	fs.IntVar(&hotPairCount, "hotpair-count", 1, "Hot Pair 数量")
 	fs.DurationVar(&hotPairRefreshInterval, "hotpair-refresh", 30*time.Second, "Hot Pair 刷新间隔")
 	fs.IntVar(&fastRetryAttempts, "fast-retry", 1, "快速重试次数")
@@ -120,6 +124,8 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&bypassRules, "bypass-rules", "", "自定义绕过规则（多行，支持 domain:/full:/IP/CIDR）")
 	fs.StringVar(&geoIPPath, "geo-ip", "", "geoip.dat 路径（v2ray 格式，覆盖内置 CN 段；留空探测程序同目录）")
 	fs.StringVar(&geoSitePath, "geo-site", "", "geosite.dat 路径（v2ray 格式，覆盖内置 CN 域名；留空探测程序同目录）")
+	fs.BoolVar(&reverseMode, "reverse", false, "启用反向模式：-l 参数不再开启本地监听，而是由服务端监听")
+	fs.BoolVar(&reverseMode, "r", false, "启用反向模式：-l 参数不再开启本地监听，而是由服务端监听")
 }
 
 var (
@@ -151,6 +157,7 @@ var (
 	bypassRules             string
 	geoIPPath               string
 	geoSitePath             string
+	reverseMode             bool
 )
 
 var bypassMatcher *xsharedrouting.Matcher
@@ -232,6 +239,14 @@ func parseFlags() *xtunnel.Config {
 	cfg.FastRetryWindow = fastRetryWindow
 	cfg.MaxFastRetryConsecutive = maxFastRetryConsecutive
 	cfg.BackpressureLimitBytes = backpressureLimitBytes
+
+	cfg.EnableReverse = reverseMode
+	if reverseMode {
+		cfg.ReverseListeners = parseListenAddrs()
+		cfg.OnReverseError = func(err error) {
+			log.Fatalf("[客户端] %v", err)
+		}
+	}
 
 	// 生成并复用客户端 ID
 	cfg.ClientID = uuid.NewString()

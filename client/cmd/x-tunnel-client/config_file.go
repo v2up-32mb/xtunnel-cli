@@ -30,6 +30,7 @@ type clientFileConfig struct {
 	FastRetryAttempts       *int    `json:"fast_retry"`
 	FastRetryWindow         *string `json:"fast_retry_window"`
 	MaxFastRetryConsecutive *int    `json:"fast_retry_consecutive"`
+	Reverse                 *bool   `json:"reverse"`
 }
 
 func visitedFlags() map[string]bool {
@@ -129,6 +130,9 @@ func applyClientFileConfig(path string, provided map[string]bool) error {
 	}
 	if cfg.MaxFastRetryConsecutive != nil && !provided["fast-retry-consecutive"] {
 		maxFastRetryConsecutive = *cfg.MaxFastRetryConsecutive
+	}
+	if cfg.Reverse != nil && !provided["reverse"] {
+		reverseMode = *cfg.Reverse
 	}
 
 	return nil

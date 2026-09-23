@@ -48,17 +48,19 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&maxTotalChannels, "max-total-channels", 0, "服务端最大总通道数，0 表示无限制")
 	fs.IntVar(&maxChannelsPerClient, "max-client-channels", 0, "每个客户端最大通道数，0 表示无限制")
 	fs.IntVar(&backpressureLimitBytes, "backpressure-limit", 32<<20, "全局队列背压阈值（字节），默认 32MB")
+	fs.IntVar(&maxReverseListeners, "max-reverse-listeners", 3, "每个客户端最大反向监听器数，默认 3")
 }
 
 var (
-	configFile              string
-	listenAddr              string
-	token                   string
-	certFile                string
-	keyFile                 string
-	maxTotalChannels        int
-	maxChannelsPerClient    int
-	backpressureLimitBytes  int
+	configFile             string
+	listenAddr             string
+	token                  string
+	certFile               string
+	keyFile                string
+	maxTotalChannels       int
+	maxChannelsPerClient   int
+	backpressureLimitBytes int
+	maxReverseListeners    int
 )
 
 func parseFlags() *server.Config {
@@ -87,6 +89,7 @@ func parseFlags() *server.Config {
 	cfg.MaxTotalChannels = maxTotalChannels
 	cfg.MaxChannelsPerClient = maxChannelsPerClient
 	cfg.BackpressureLimitBytes = backpressureLimitBytes
+	cfg.MaxReverseListeners = maxReverseListeners
 
 	return cfg
 }
