@@ -119,10 +119,6 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		server:     srv,
 	}
 	log.Printf("[服务端] 反向监听已开启: %s (客户端 %s)", specStr, protocol.ShortID(clientID))
-	// 反向预热：监听就绪即尝试补足预热 Pair（不必等刷新周期）
-	if m.pool != nil && m.pool.reversePairWarmer != nil {
-		m.pool.reversePairWarmer.Kick()
-	}
 	m.reply(clientID, chID, listenerID, protocol.StatusOK, "")
 }
 

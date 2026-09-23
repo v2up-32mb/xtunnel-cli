@@ -16,8 +16,8 @@ import (
 )
 
 // ServerReverseConn 服务端反向连接状态（请求方）。
-// sendCh = P1（客户端选定的服务端发包通道，来自 MsgSelectUplink meta）；
-// recvCh = P2（服务端竞争获胜的收包通道，即 MsgSelectUplink 的首达通道）。
+// sendCh = 服务端发包通道（ChB，server→client；热路径来自预热表，经典路径来自 MsgSelectUplink meta）；
+// recvCh = 服务端收包通道（ChA，client→server；热路径来自预热表，经典路径取 MsgSelectUplink 首达通道）。
 type ServerReverseConn struct {
 	connID        string
 	target        string
@@ -33,7 +33,10 @@ type ServerReverseConn struct {
 	ok      bool
 	errMsg  string
 
-	downlinkSent int32 // atomic：兜底修复时 SelectDownlink 只补发一次
+	// pairPreset：DialStream 从预热表取到 Pair 并预置收发通道。
+	// 客户端丢失热表回退经典选路时，允许一次性的兜底修复（repaired）。
+	pairPreset bool
+	repaired   int32 // atomic：兜底修复只补发一次 SelectDownlink
 }
 
 func newServerReverseConn(connID, clientID, target string) *ServerReverseConn {
@@ -67,22 +70,26 @@ type reverseDialer struct {
 }
 
 // DialStream 实现 dialer.Dialer（反向模式请求方）：
-// 广播 MsgTCPConnect → 竞争 MsgSelectUplink 定 P1/P2 → 经 P1 回 MsgSelectDownlink
-// → 等 MsgConnStatus → 返回应用侧管道端。
+// 预热热路径：从预热表取最新 Pair，connID = 键 + '.' + 唯一后缀，单播 MsgTCPConnect
+// 到 ChB（服务端发包通道），客户端按前缀查表直接获得完整收发通道，拨号期零选路消息；
+// 无就绪 Pair / 单播失败 → 广播 MsgTCPConnect → 竞争 MsgSelectUplink 定 P1/P2
+// → 经 P1 回 MsgSelectDownlink → 等 MsgConnStatus → 返回应用侧管道端。
+// Pair 共享复用：后缀保证并发连接 connID 互不冲突。
 func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn, error) {
 	if d.pool.countActiveChannelsForClient(d.clientID) == 0 {
 		return nil, fmt.Errorf("无可用客户端通道")
 	}
-	// Hot Pair 路径：预热 Pair 就绪则单播直达（镜像正向 RegisterAndBroadcastTCP）。
-	// connID 复用 prebind connID 作为关联凭证——客户端凭它把 warm 状态提升为真实连接，
-	// 收发通道在预热期已协商完毕，拨号期零选路消息。
-	var pair *ReverseHotPair
-	if d.pool.reversePairWarmer != nil {
-		pair = d.pool.reversePairWarmer.AcquirePair(d.clientID)
+	// 预热热路径：最新表项 + 双通道活性校验
+	var entry *HotPairEntry
+	if d.pool.hotPairs != nil {
+		e := d.pool.hotPairs.Newest(d.clientID)
+		if e != nil && d.pool.channelAliveForClient(d.clientID, e.ChA) && d.pool.channelAliveForClient(d.clientID, e.ChB) {
+			entry = e
+		}
 	}
 	connID := uuid.NewString()
-	if pair != nil {
-		connID = pair.ID
+	if entry != nil {
+		connID = protocol.HotPairConnID(entry.Key, connID)
 	}
 	rc := newServerReverseConn(connID, d.clientID, target)
 
@@ -95,17 +102,20 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 	copy(meta[1:], []byte(target))
 	msg := protocol.EncodeMessage(protocol.MsgTCPConnect, connID, meta, nil)
 
-	if pair != nil {
-		atomic.StoreInt32(&rc.sendCh, int32(pair.P1))
-		atomic.StoreInt32(&rc.recvCh, int32(pair.P2))
-		if err := d.pool.sendToChannel(d.clientID, pair.P1, websocket.BinaryMessage, msg); err != nil {
-			// Pair 通道已失效：废弃该通道全部 Pair 并回退广播竞争
-			log.Printf("[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", pair.P1, err)
-			d.pool.reversePairWarmer.InvalidateChannel(pair.P1)
-			pair = nil
+	if entry != nil {
+		atomic.StoreInt32(&rc.sendCh, int32(entry.ChB)) // 服务端发包通道（server→client）
+		atomic.StoreInt32(&rc.recvCh, int32(entry.ChA)) // 服务端收包通道（client→server）
+		rc.pairPreset = true
+		log.Printf("[服务端] 反向拨号走预热 Pair (键:%s ChA:%d ChB:%d)，客户端 %s，ID:%s",
+			protocol.ShortID(entry.Key), entry.ChA, entry.ChB, protocol.ShortID(d.clientID), protocol.ShortID(connID))
+		if err := d.pool.sendToChannel(d.clientID, entry.ChB, websocket.BinaryMessage, msg); err != nil {
+			// Pair 通道已失效：废弃该通道全部表项并回退广播竞争
+			log.Printf("[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", entry.ChB, err)
+			d.pool.hotPairs.InvalidateChannel(entry.ChB)
+			entry = nil
 		}
 	}
-	if pair == nil {
+	if entry == nil {
 		if err := d.pool.broadcastWriteToClient(d.clientID, websocket.BinaryMessage, msg); err != nil {
 			d.pool.removeReverseConn(connID)
 			return nil, fmt.Errorf("无可用客户端通道")
@@ -188,31 +198,31 @@ func (p *serverPool) handleReverseMessage(clientID string, chID int, msgType pro
 	}
 	switch msgType {
 	case protocol.MsgSelectUplink:
-		// 首达竞争：sendCh 来自 meta（P1），recvCh 取首达通道（P2）
 		if len(meta) < 4 {
 			return
 		}
-		if atomic.LoadInt32(&rc.sendCh) != 0 {
-			// 兜底修复：客户端丢失 warm 状态（TTL 到期/广播副本）后重新选路。
-			// 采用客户端的收包通道（meta）作为服务端发包通道，并补发一次
-			// MsgSelectDownlink 让客户端拿到服务端收包通道（幂等）。
-			clientRecv := int32(binary.BigEndian.Uint32(meta[:4]))
-			atomic.StoreInt32(&rc.sendCh, clientRecv)
-			if atomic.CompareAndSwapInt32(&rc.downlinkSent, 0, 1) {
-				downMeta := make([]byte, 4)
-				binary.BigEndian.PutUint32(downMeta, uint32(atomic.LoadInt32(&rc.recvCh)))
-				_ = p.sendToChannel(clientID, int(clientRecv), websocket.BinaryMessage,
-					protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
-			}
+		clientRecv := int32(binary.BigEndian.Uint32(meta[:4]))
+		if atomic.CompareAndSwapInt32(&rc.sendCh, 0, clientRecv) {
+			// 首达竞争：sendCh 来自 meta（客户端收包通道），recvCh 取到达通道（客户端发包通道），
+			// 并经 sendCh 回 MsgSelectDownlink 让客户端拿到服务端收包通道
+			atomic.StoreInt32(&rc.recvCh, int32(chID))
+			downMeta := make([]byte, 4)
+			binary.BigEndian.PutUint32(downMeta, uint32(chID))
+			_ = p.sendToChannel(clientID, int(clientRecv), websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
 			return
 		}
-		send := int32(binary.BigEndian.Uint32(meta[:4]))
-		if atomic.CompareAndSwapInt32(&rc.sendCh, 0, send) {
-			if atomic.CompareAndSwapInt32(&rc.recvCh, 0, int32(chID)) {
-				downMeta := make([]byte, 4)
-				binary.BigEndian.PutUint32(downMeta, uint32(chID))
-				_ = p.sendToChannel(clientID, int(send), websocket.BinaryMessage, protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
-			}
+		// sendCh 已定型：仅预热热路径允许一次兜底修复——客户端丢失热表后
+		// 重新选路（广播副本到达），采用客户端实际收发通道替换预置值，并
+		// 幂等补发一次 MsgSelectDownlink（经典路径的重复帧在此被忽略）
+		if rc.pairPreset && atomic.CompareAndSwapInt32(&rc.repaired, 0, 1) {
+			atomic.StoreInt32(&rc.sendCh, clientRecv)
+			atomic.StoreInt32(&rc.recvCh, int32(chID))
+			downMeta := make([]byte, 4)
+			binary.BigEndian.PutUint32(downMeta, uint32(chID))
+			_ = p.sendToChannel(clientID, int(clientRecv), websocket.BinaryMessage,
+				protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
+			log.Printf("[服务端] 反向连接 %s 兜底修复：采用客户端重新选路通道 (发包:%d 收包:%d)",
+				protocol.ShortID(connID), clientRecv, chID)
 		}
 
 	case protocol.MsgConnStatus:

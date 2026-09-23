@@ -55,8 +55,8 @@ type serverPool struct {
 	// 反向监听管理器
 	reverseManager *ReverseListenerManager
 
-	// 反向预热器（-hotpair 启用）
-	reversePairWarmer *ReversePairWarmer
+	// 预热通道对表（被动）：健康维护由客户端负责，经 MsgHotPairNotify 通知存储
+	hotPairs *HotPairTable
 
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
@@ -83,16 +83,9 @@ func newServerPool(token string, config *Config) *serverPool {
 	}
 	p.reverseManager = NewReverseListenerManager(config.MaxReverseListeners)
 	p.reverseManager.pool = p
-	// 反向预热器常驻：是否预热由客户端 -hotpair 信号决定（MsgReverseHotPair），服务端零配置
-	p.reversePairWarmer = NewReversePairWarmer(p)
+	// 预热通道对表：被动接收客户端 MsgHotPairNotify，正向提升与反向热拨号共用
+	p.hotPairs = NewHotPairTable()
 	return p
-}
-
-// startReversePairWarmer 启动反向预热循环（幂等；仅 -hotpair 启用时生效）
-func (p *serverPool) startReversePairWarmer() {
-	if p.reversePairWarmer != nil {
-		p.reversePairWarmer.Start()
-	}
 }
 
 // initReverseManager 已废弃：Manager 在 newServerPool 中随池创建，避免懒初始化数据竞争
@@ -210,11 +203,6 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
 
-	// 反向预热：新通道就绪即尝试补足预热 Pair
-	if p.reversePairWarmer != nil {
-		p.reversePairWarmer.Kick()
-	}
-
 	// 启动写入协程
 	wsConn.start()
 
@@ -253,6 +241,14 @@ func (p *serverPool) countActiveChannelsForClient(clientID string) int {
 		}
 	}
 	return cnt
+}
+
+// channelAliveForClient 指定客户端的指定通道是否活跃（预热表项使用前校验）
+func (p *serverPool) channelAliveForClient(clientID string, chID int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	wsConn := p.clientChConns[clientID][chID]
+	return wsConn != nil && !wsConn.closed
 }
 
 func (p *serverPool) connectTimeout() time.Duration {
@@ -294,20 +290,14 @@ func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgTyp
 		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
 		return
 	}
-	// 反向预热：预绑定回包（仅反向模式会收到 MsgSelectUplink，正向是服务端下发方向）
-	if p.reversePairWarmer != nil && isReversePrebindConnID(connID) && msgType == protocol.MsgSelectUplink {
-		p.reversePairWarmer.HandlePrebindUplink(clientID, chID, connID, meta)
+	// 预热通道对：收到客户端批量预热通知（健康维护由客户端负责）
+	if p.hotPairs != nil && msgType == protocol.MsgHotPairNotify {
+		p.hotPairs.HandleNotify(clientID, payload)
 		return
 	}
 	switch msgType {
 	case protocol.MsgReverseListen:
 		p.reverseManager.HandleReverseListen(clientID, chID, connID, meta)
-		return
-	case protocol.MsgReverseHotPair:
-		// 客户端 -hotpair 授权：为本客户端启用反向 Pair 预热（幂等）
-		if p.reversePairWarmer != nil {
-			p.reversePairWarmer.EnableClient(clientID)
-		}
 		return
 	case protocol.MsgTCPConnect:
 		p.handleTCPConnect(clientID, chID, connID, meta)
@@ -457,12 +447,11 @@ func (p *serverPool) cleanupChannel(clientID string, chID int) {
 		p.removeReverseConn(connID)
 	}
 
-	if p.reversePairWarmer != nil {
+	if p.hotPairs != nil {
 		if clientGone {
-			p.reversePairWarmer.DisableClient(clientID)
-			p.reversePairWarmer.InvalidateClient(clientID)
+			p.hotPairs.InvalidateClient(clientID)
 		} else {
-			p.reversePairWarmer.InvalidateChannel(chID)
+			p.hotPairs.InvalidateChannel(chID)
 		}
 	}
 	if clientGone && p.reverseManager != nil {
@@ -546,9 +535,6 @@ func (p *serverPool) Shutdown() {
 	// 先关闭反向监听器，释放端口并失败化等待中的反向拨号
 	if p.reverseManager != nil {
 		p.reverseManager.Shutdown()
-	}
-	if p.reversePairWarmer != nil {
-		p.reversePairWarmer.Stop()
 	}
 	p.mu.RLock()
 	conns := make([]*ServerWSConn, 0, len(p.wsConns))
