@@ -111,7 +111,7 @@ func registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&maxSOCKS5Connections, "max-socks5-conns", 1024, "SOCKS5 最大并发连接数，0 表示无限制")
 	fs.DurationVar(&connectTimeout, "connect-timeout", 15*time.Second, "本地代理等待远端建链超时")
 	fs.StringVar(&ips, "ips", "", "服务端解析目标地址的IP偏好\n 4: 仅IPv4\n 6: 仅IPv6\n 4,6: IPv4优先\n 6,4: IPv6优先")
-	fs.BoolVar(&enableHotPair, "hotpair", false, "启用 Hot Channel Pair 降低首帧延迟")
+	fs.BoolVar(&enableHotPair, "hotpair", false, "启用 Hot Channel Pair 降低首帧延迟（正向=本地预热；反向=通知服务端预热）")
 	fs.IntVar(&hotPairCount, "hotpair-count", 1, "Hot Pair 数量")
 	fs.DurationVar(&hotPairRefreshInterval, "hotpair-refresh", 30*time.Second, "Hot Pair 刷新间隔")
 	fs.IntVar(&fastRetryAttempts, "fast-retry", 1, "快速重试次数")

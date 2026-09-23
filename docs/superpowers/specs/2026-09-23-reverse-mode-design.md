@@ -162,7 +162,7 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
                 → InvalidateChannel 废弃包含该通道的 Pair 并重新预热
 ```
 
-配置：预热由请求方开启，故反向的 `-hotpair` / `-hotpair-count` / `-hotpair-refresh` 为**服务端 flag**（与客户端正向 flag 同名同义）。
+配置（v3 修订）：预热开关由**客户端启动参数**决定（与 `-l` 同一控制权归属）——客户端 `-r -hotpair` 时，每条通道就绪发送新增消息 `MsgReverseHotPair (0x22)`（空 meta/payload）授权服务端为本客户端预热；服务端**零配置项**，预热器常驻、参数为内部常量（每客户端 1 对、30s 刷新），仅对已授权且已注册监听器的客户端生效；客户端全部通道掉线撤销授权，重连需重新授权。旧服务端 switch 无此 case 自动忽略（无预热但功能不受影响）；旧客户端不发该消息，服务端永不预热。预绑定/预热请求与响应仍复用 `MsgPrebindRequest`/`MsgSelectUplink`，无格式变更。
 
 ## 4c. 反向连接建立时序说明（P1 = 服务端发包通道，P2 = 客户端发包通道）
 
@@ -223,10 +223,10 @@ UUID 冲突概率可忽略，且每条连接只存在于一张表中，分发无
 | 文件 | 改动 |
 |---|---|
 | `reverse.go`（新） | ① `ReverseListenerManager`：`(clientID, 监听值) → listener` 注册表；bind 用 `xshared/socks5`、`xshared/httpproxy`（协议/鉴权/max-conns 由监听值决定）；结果回 `MsgReverseListenResult`；每客户端监听器数上限（`-max-reverse-listeners`，默认 3）；② `reverseDialer` 实现 `dialer.Dialer`（镜像 `clientPool` 请求方逻辑）：登记反向表 → 取 Pair 或广播 `MsgTCPConnect` → 竞争 `MsgSelectUplink` 得 P2 → 等 `MsgConnStatus`（带超时）→ 经 P1 发 `MsgSelectDownlink` → 返回内存管道 conn；上行泵管道读 → `MsgTCPData`；③ 反向连接表 + P1/P2 收包校验 |
-| `reverse_pair_warmer.go`（新，可选） | `-hotpair` 启用时的服务端预热器：按客户端维护 `{P1,P2}` 预热 Pair，复用 `MsgPrebindRequest`；镜像 `InvalidateChannel`/刷新/兑底逻辑 |
+| `reverse_pair_warmer.go`（新，可选） | 服务端预热器（常驻）：为已授权（`MsgReverseHotPair`）且已注册监听器的客户端维护 `{P1,P2}` 预热 Pair，复用 `MsgPrebindRequest`；镜像 `InvalidateChannel`/刷新/兑底逻辑 |
 | `pool.go` 小改 | `handleMessage`：`MsgReverseListen`/`MsgSelectUplink`（反向分支）/`MsgConnStatus`（反向分支）分发；`MsgTCPData`/`MsgTCPClose` 反向分支；`cleanupChannel`：清反向连接 + 客户端最后通道断开时注销其监听器 |
 | `server.go` | Manager 随 Server 启停 |
-| `cmd/main.go` | 新 flag：`-max-reverse-listeners`（默认 3）；`-hotpair` / `-hotpair-count` / `-hotpair-refresh`（仅作用于反向预热器，语义同客户端正向 flag）。监听地址/协议完全由客户端 `-l` 值驱动 |
+| `cmd/main.go` | 新 flag：`-max-reverse-listeners`（默认 3）。无预热相关配置——是否预热完全由客户端 `-hotpair` 决定 |
 | 测试 | `reverse_test.go`：注册/幂等/端口冲突 ERR、最后通道断开注销、竞争时序、多客户端端口隔离（A:30000/B:30001 各自出流） |
 
 ### 6.3 CLI 客户端 `client/cmd`
