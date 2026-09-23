@@ -933,7 +933,8 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 	sent := p.broadcastWrite(websocket.BinaryMessage, msg)
 	if sent == 0 {
 		log.Printf("[客户端] %s 广播 TCP 连接请求失败，无可用通道，ID:%s", reqType, common.ShortID(connID))
-		p.Unregister(connID)
+		// 保留连接状态：调用方的 connected 超时等待会回 SOCKS5/HTTP 失败回执并注销；
+		// 若此处注销，调用方拿到 connected==nil 会跳过超时直接关连接（客户端收到空关闭）
 	}
 }
 
