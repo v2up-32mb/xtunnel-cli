@@ -42,3 +42,4 @@ core
 # 工具生成目录
 .claude/
 .codebase-memory/
+.pi/
