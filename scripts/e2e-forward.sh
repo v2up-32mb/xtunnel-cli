@@ -111,6 +111,14 @@ else
   exit 1
 fi
 
+# 预热热路径断言：客户端单播拨号 + 服务端按键提升（connID = 键.唯一后缀，零选路消息）
+if grep -q "单播拨号" "$CLIENT_LOG" && grep -q "预热 Pair 提升" "$SERVER_LOG"; then
+  echo "[e2e] ASSERT PASS: dial via prewarmed pair (hot path, connID = key.suffix)"
+else
+  echo "[e2e] WARNING: hot-path markers not found (dial may have used fallback)"
+  grep -n "Hot Pair\|预热" "$CLIENT_LOG" | tail -5
+fi
+
 # 6. concurrent requests（回归：并发连接 connID 必须互不冲突）
 echo "[e2e] concurrent ${CONCURRENCY} requests..."
 PIDS=()

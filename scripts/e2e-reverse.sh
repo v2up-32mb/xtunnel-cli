@@ -178,13 +178,13 @@ if ! wait_for "反向监听已注册" "$CLIENT_LOG_HP" 30; then
   exit 1
 fi
 
-if ! wait_for "Pair 构建完成" "$SERVER_LOG_HP" 30; then
-  echo "[e2e] ERROR: ReversePairWarmer never built a pair"
+if ! wait_for "预热通道对通知" "$SERVER_LOG_HP" 30; then
+  echo "[e2e] ERROR: server never received MsgHotPairNotify"
   echo "--- server log ---"
   tail -n 200 "$SERVER_LOG_HP"
   exit 1
 fi
-echo "[e2e] ASSERT PASS: prewarmed pair built"
+echo "[e2e] ASSERT PASS: prewarmed pair notified (MsgHotPairNotify)"
 
 sleep 1  # 留出预热 Pair 就绪窗口，让下一次 curl 走单播快路径
 TMP_OUT_HP="$TMPDIR/curl-hotpair.out"
@@ -201,6 +201,13 @@ else
   echo "[e2e] ERROR: marker not found in hotpair curl output"
   cat "$TMP_OUT_HP"
   exit 1
+fi
+
+# 预热热路径拨号断言：connID 带键前缀、零选路消息
+if grep -q "反向拨号走预热 Pair" "$SERVER_LOG_HP"; then
+  echo "[e2e] ASSERT PASS: reverse dial via prewarmed pair (hot path)"
+else
+  echo "[e2e] WARNING: hot-path dial marker not found (dial may have used fallback)"
 fi
 
 echo "[e2e] ALL ASSERTIONS PASSED"
