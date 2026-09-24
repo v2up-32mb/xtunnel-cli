@@ -21,12 +21,13 @@ func newTestServerPool() *serverPool {
 		conns:             make(map[string]*ServerConnState),
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
+		prebindTTL:        100 * time.Millisecond,
 		globalQueueLimit:  1024,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
 }
 
-func TestHandlePrebindRequestCleansUpState(t *testing.T) {
+func TestHandlePrebindRequestStateSurvivesThenCleansUp(t *testing.T) {
 	p := newTestServerPool()
 	connID := "prebind-test-1"
 	meta := []byte{0}
@@ -34,11 +35,21 @@ func TestHandlePrebindRequestCleansUpState(t *testing.T) {
 
 	p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
 
+	// 短存活窗口内状态应存在（同轮重复预绑定帧据此被忽略，避免广播风暴）
 	p.mu.RLock()
 	_, exists := p.conns[connID]
 	p.mu.RUnlock()
+	if !exists {
+		t.Fatal("prebind connID should survive within TTL window")
+	}
+
+	// 窗口结束后应清理，不泄漏
+	time.Sleep(p.prebindTTL + 200*time.Millisecond)
+	p.mu.RLock()
+	_, exists = p.conns[connID]
+	p.mu.RUnlock()
 	if exists {
-		t.Fatal("prebind connID should be cleaned up")
+		t.Fatal("prebind connID should be cleaned up after TTL")
 	}
 }
 
@@ -50,11 +61,13 @@ func TestPrebindDoesNotLeakConns(t *testing.T) {
 		connID := fmt.Sprintf("prebind-%d", i)
 		p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
 	}
+	// 每个预绑定状态短存活 TTL，所有 AfterFunc 注销后应无残留
+	time.Sleep(p.prebindTTL + 300*time.Millisecond)
 	p.mu.RLock()
 	n := len(p.conns)
 	p.mu.RUnlock()
 	if n != 0 {
-		t.Fatalf("expected 0 conns after prebind, got %d", n)
+		t.Fatalf("expected 0 conns after prebind TTL, got %d", n)
 	}
 }
 

@@ -12,6 +12,14 @@ import (
 
 // ======================== TCP 处理 ========================
 
+// prebindStateTTL 预绑定状态短存活窗口（默认值）：健康检查时客户端并行广播 ~N 条
+// 预绑定帧，首帧建状态并广播 MsgSelectUplink；窗口内其余帧因状态已存在被忽略，
+// 避免每帧重建状态重新广播（广播风暴）。实测一轮预绑定在同秒内到齐，5s 窗口
+// 对任意慢链路的一轮都足够，窗口结束后注销状态释放。
+// 可通过 serverPool.prebindTTL 覆盖（测试用）。
+// 演进目标（B 方案）：后续用显式 begin 消息替代定时窗口，见设计讨论。
+const prebindStateTTL = 5 * time.Second
+
 // handleTCPConnect 处理 TCP 连接请求
 func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, meta []byte) {
 	if len(meta) < 1 {
@@ -256,6 +264,17 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 
 	ipStrategy := protocol.IPStrategy(meta[0])
 
+	// 发布状态前先解析归属客户端，避免把字段写进已发布的状态（数据竞争）
+	p.mu.RLock()
+	wsConn := p.clientChConns[clientID][chID]
+	p.mu.RUnlock()
+
+	var inboundClientID, inboundAddr string
+	if wsConn != nil {
+		inboundClientID = wsConn.clientID
+		inboundAddr = wsConn.remoteAddr
+	}
+
 	p.mu.Lock()
 	if _, exists := p.conns[connID]; exists {
 		p.mu.Unlock()
@@ -267,24 +286,28 @@ func (p *serverPool) handlePrebindRequest(clientID string, chID int, connID stri
 		uplinkChID: chID,
 		ipStrategy: ipStrategy,
 		connected:  true,
+		clientID:   inboundClientID,
+		clientAddr: inboundAddr,
 	}
 	p.conns[connID] = st
 	p.mu.Unlock()
-
-	p.mu.RLock()
-	wsConn := p.clientChConns[clientID][chID]
-	p.mu.RUnlock()
-	if wsConn != nil {
-		st.clientID = wsConn.clientID
-		st.clientAddr = wsConn.remoteAddr
-	}
 
 	uplinkChIDBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
 	_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
 
-	// 预绑定只完成上行选择，立即清理状态，避免泄漏
-	p.unregisterConn(connID)
+	// 预绑定只完成上行选择。状态保留一个短存活窗口，期间并行到达的重复预绑定帧
+	// 会因上方 p.conns[connID] 已存在而直接忽略，避免每帧都重建状态并再次广播
+	// MsgSelectUplink（原为立即注销，导致一次健康检查 ~N 条并行预绑定触发 ~N 轮
+	// 广播风暴）。窗口结束后再清理状态，避免泄漏。
+	connIDCopy := connID
+	ttl := p.prebindTTL
+	if ttl <= 0 {
+		ttl = prebindStateTTL
+	}
+	time.AfterFunc(ttl, func() {
+		p.unregisterConn(connIDCopy)
+	})
 }
 
 // forwardTargetToClient 转发目标→客户端数据

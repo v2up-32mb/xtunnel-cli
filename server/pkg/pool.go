@@ -58,6 +58,9 @@ type serverPool struct {
 	// 预热通道对表（被动）：健康维护由客户端负责，经 MsgHotPairNotify 通知存储
 	hotPairs *HotPairTable
 
+	// prebindTTL 预绑定状态短存活窗口（默认 prebindStateTTL，测试可覆盖）
+	prebindTTL time.Duration
+
 	// 背压控制
 	globalQueueBytes     int64 // 全局队列字节数
 	globalQueueLimit     int64 // 全局队列字节限制
@@ -78,6 +81,7 @@ func newServerPool(token string, config *Config) *serverPool {
 		wsConns:           make([]*ServerWSConn, 0),
 		clientChConns:     make(map[string]map[int]*ServerWSConn),
 		revConns:          make(map[string]*ServerReverseConn),
+		prebindTTL:        prebindStateTTL,
 		globalQueueLimit:  limit,
 		backpressureState: int32(protocol.BackpressureNormal),
 	}
