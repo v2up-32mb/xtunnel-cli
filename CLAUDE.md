@@ -134,6 +134,9 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 - [ ] 支持更多代理协议 (HTTP Proxy)
 - [ ] 预绑定竞速演进(B 方案):显式 begin 消息替代 prebindStateTTL 定时窗口,轮次边界显式化,
       每轮广播次数确定性为 1;需协议变更(上游 xtunnel 模块升版 + 服务端 + 本分支客户端同步,旧端兑底)。
+- [ ] 服务端核心库化(C 方案):server/pkg 迁入上游 xtunnel 库(xtunnel/server 子包),与客户端核心同样
+      注入日志钩子(SetServerLogf,默认静默)、壳启动时 SetLogf 接管;目标:服务端核心可复用、日志由壳管、
+      protocol+服务端核心同版本同步发版。与 B 方案一起排 v0.3.0 演进批次。
 
 ## RelayNodeManager 实现说明
 
