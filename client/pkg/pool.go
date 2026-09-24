@@ -1326,7 +1326,9 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 					pr = &prebindRacer{}
 					p.prebindRacers[connID] = pr
 					connIDCopy := connID
-					time.AfterFunc(400*time.Millisecond, func() {
+					time.AfterFunc(3*time.Second, func() {
+						// 服务端一轮一广播后，各通道收到单帧的时间差取决于各自链路延迟，
+						// 汇总窗口需覆盖慢通道，避免漏计（3s 足够，健康检查间隔 30s 不重叠）
 						p.mu.Lock()
 						pr2 := p.prebindRacers[connIDCopy]
 						if pr2 == nil || pr2.logged {
