@@ -132,6 +132,8 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 - [ ] 添加配置文件支持
 - [ ] 添加连接超时控制
 - [ ] 支持更多代理协议 (HTTP Proxy)
+- [ ] 预绑定竞速演进(B 方案):显式 begin 消息替代 prebindStateTTL 定时窗口,轮次边界显式化,
+      每轮广播次数确定性为 1;需协议变更(上游 xtunnel 模块升版 + 服务端 + 本分支客户端同步,旧端兑底)。
 
 ## RelayNodeManager 实现说明
 
