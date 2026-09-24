@@ -1336,11 +1336,21 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 						pr2.logged = true
 						chs := append([]int(nil), pr2.chs...)
 						p.mu.Unlock()
-						log.Printf("[PairWarmer] 预绑定 %s 收帧汇总: 共 %d 条通道收到 MsgSelectUplink: %v",
+						log.Printf("[PairWarmer] 预绑定 %s 收帧汇总: 去重后 %d 条不同通道收到 MsgSelectUplink: %v",
 							common.ShortID(connIDCopy), len(chs), chs)
 					})
 				}
-				pr.chs = append(pr.chs, chID)
+				// 按通道去重后才入列：诊断只关心'多少条不同通道收到过'
+				dup := false
+				for _, c := range pr.chs {
+					if c == chID {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					pr.chs = append(pr.chs, chID)
+				}
 				p.mu.Unlock()
 			}
 
