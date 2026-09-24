@@ -720,3 +720,37 @@ func TestHandleTCPConnectUsesRemoteAddrForClientAddr(t *testing.T) {
 		t.Fatalf("clientAddr = %q, want remote address", st.clientAddr)
 	}
 }
+
+// TestPrebindDuplicatesIgnoredFirstArrivalWins 同 connID 重复帧应被忽略、
+// 首到者定上行，且不重建状态（一轮仅一广播的核心保证）
+func TestPrebindDuplicatesIgnoredFirstArrivalWins(t *testing.T) {
+	p := newTestServerPool()
+	meta := []byte{0}
+	meta = append(meta, protocol.PrebindTarget...)
+	connID := "prebind-dup-1"
+
+	// 第一条：通道 1 先到，成为上行
+	p.handleMessage("", 1, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+	// 同 connID 重复帧：通道 20、30 随后到达，应被忽略（不重建状态、不改上行）
+	p.handleMessage("", 20, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+	p.handleMessage("", 30, 10, protocol.MsgPrebindRequest, connID, meta, nil)
+
+	p.mu.RLock()
+	st := p.conns[connID]
+	p.mu.RUnlock()
+	if st == nil {
+		t.Fatal("prebind state should exist within TTL")
+	}
+	if st.uplinkChID != 1 {
+		t.Fatalf("first arrival should win uplink, got %d", st.uplinkChID)
+	}
+
+	// TTL 后清理
+	time.Sleep(p.prebindTTL + 200*time.Millisecond)
+	p.mu.RLock()
+	_, exists := p.conns[connID]
+	p.mu.RUnlock()
+	if exists {
+		t.Fatal("prebind state should be cleaned after TTL")
+	}
+}

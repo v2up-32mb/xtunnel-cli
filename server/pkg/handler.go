@@ -30,6 +30,16 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 	ipStrategy := protocol.IPStrategy(meta[0])
 	target := string(meta[1:])
 
+	// 发布状态前先解析归属客户端，避免对已发布状态无锁写 clientID/clientAddr（数据竞争）
+	p.mu.RLock()
+	wsConn := p.clientChConns[clientID][chID]
+	p.mu.RUnlock()
+	var inboundClientID, inboundAddr string
+	if wsConn != nil {
+		inboundClientID = wsConn.clientID
+		inboundAddr = wsConn.remoteAddr
+	}
+
 	// 第一个到达的通道占用连接,后续的丢弃
 	p.mu.Lock()
 	st, exists := p.conns[connID]
@@ -42,18 +52,11 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 			ipStrategy: ipStrategy,
 			isUDP:      false,
 			connected:  false,
+			clientID:   inboundClientID,
+			clientAddr: inboundAddr,
 		}
 		p.conns[connID] = st
 		p.mu.Unlock()
-
-		// 获取客户端地址（chID 属于该来源客户端自己的编号空间）
-		p.mu.RLock()
-		wsConn := p.clientChConns[clientID][chID]
-		p.mu.RUnlock()
-		if wsConn != nil {
-			st.clientID = wsConn.clientID
-			st.clientAddr = wsConn.remoteAddr
-		}
 
 		// 发送 MsgSelectUplink（广播）携带上行通道 ID；预热热路径（connID 携带
 		// Pair 键前缀且到达通道与表项发包方向一致）预置下行通道，跳过选路帧，
@@ -347,6 +350,16 @@ func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, 
 	ipStrategy := protocol.IPStrategy(meta[0])
 	target := string(meta[1:])
 
+	// 发布状态前先解析归属客户端，避免对已发布状态无锁写 clientID/clientAddr（数据竞争）
+	p.mu.RLock()
+	wsConn := p.clientChConns[clientID][chID]
+	p.mu.RUnlock()
+	var inboundClientID, inboundAddr string
+	if wsConn != nil {
+		inboundClientID = wsConn.clientID
+		inboundAddr = wsConn.remoteAddr
+	}
+
 	p.mu.Lock()
 	if _, exists := p.conns[connID]; exists {
 		p.mu.Unlock()
@@ -371,6 +384,8 @@ func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, 
 		ipStrategy: ipStrategy,
 		isUDP:      true,
 		connected:  true,
+		clientID:   inboundClientID,
+		clientAddr: inboundAddr,
 	}
 
 	p.mu.Lock()
@@ -381,14 +396,6 @@ func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, 
 	}
 	p.conns[connID] = st
 	p.mu.Unlock()
-
-	p.mu.RLock()
-	wsConn := p.clientChConns[clientID][chID]
-	p.mu.RUnlock()
-	if wsConn != nil {
-		st.clientID = wsConn.clientID
-		st.clientAddr = wsConn.remoteAddr
-	}
 
 	// 发送 MsgSelectUplink（广播）,携带上行通道ID
 	uplinkChIDBytes := make([]byte, 4)
