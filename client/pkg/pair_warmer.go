@@ -289,6 +289,7 @@ func (w *PairWarmer) BuildPair(available []int) (*HotChannelPair, error) {
 		w.deletePrebindState(connID)
 		return nil, fmt.Errorf("无法发送预绑定请求到任何可用通道")
 	}
+	log.Printf("[PairWarmer] 预绑定竞速广播: 可用通道 %d 个, 成功入队 %d 个, 失败 %d 个", len(available), sent, len(available)-sent)
 
 	// 等待预绑定结果
 	timer := time.NewTimer(w.config.PrebindTimeout)

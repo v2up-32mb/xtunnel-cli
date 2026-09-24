@@ -43,6 +43,8 @@ type clientConnState struct {
 	clientAddr string
 	closed     bool
 	pair       *HotChannelPair
+	// [诊断] 预绑定竞速参与通道数（统计一次预绑定收到 MsgSelectUplink 的通道数）
+	prebindSeen int32
 }
 
 // clientPool 客户端连接池
@@ -1303,6 +1305,16 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			}
 			p.noteUplink(connID, uplinkChID)
 
+			// [诊断] 预绑定竞速参与计数：每个收到 MsgSelectUplink 的通道都计一次
+			isPrebind := strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".")
+			if isPrebind {
+				p.mu.RLock()
+				if st := p.conns[connID]; st != nil {
+					atomic.AddInt32(&st.prebindSeen, 1)
+				}
+				p.mu.RUnlock()
+			}
+
 			// 选择当前通道作为下行通道（最快收到 MsgSelectUplink 的获胜）
 			selected, chosen, _, target, up, _ := p.selectDownlink(connID, chID)
 			if selected {
@@ -1326,7 +1338,15 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 
 				// 如果是预绑定请求（裸键 connID，无拨号后缀），通知 PairWarmer 完成 Pair 构建；
 				// 带后缀的拨号 connID 前缀相同但已脱离预热流程，不在此列
-				if p.pairWarmer != nil && strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".") {
+				if p.pairWarmer != nil && isPrebind {
+					seen := int32(0)
+					p.mu.RLock()
+					if st := p.conns[connID]; st != nil {
+						seen = atomic.LoadInt32(&st.prebindSeen)
+					}
+					p.mu.RUnlock()
+					log.Printf("[PairWarmer] 预绑定竞速完成: 候选上行=%d 下行=%d, 参与下行竞争 %d 条通道, connID=%s",
+						uplinkChID, chosen, seen, common.ShortID(connID))
 					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}
