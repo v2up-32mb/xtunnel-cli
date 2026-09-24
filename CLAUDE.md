@@ -133,6 +133,11 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
 - [ ] 优化 ECH 配置刷新机制
 - [ ] 添加连接超时控制
 - [ ] 支持更多代理协议 (HTTP Proxy)
+- [ ] 预绑定竞速演进(B 方案):新增显式 begin 消息替代预绑定状态短存活定时窗口(prebindStateTTL)。
+      客户端广播前先通知服务端"即将开始 hotpair 建立",服务端 armed;首帧 prebind 定上行并
+      广播 MsgSelectUplink;其余帧在该 connID 状态下被忽略;轮次结束(客户端 done 或超时)
+      立即注销。目标:轮次边界显式化、低延迟链路上不再依赖 5s 定时窗口、广播次数确定性为每轮 1 次。
+      注意:属协议变更,需同步 win7-compat 客户端、上游 xtunnel 模块(升版/发版)与服务端,旧端需兼容兑底。
 
 ## RelayNodeManager 实现说明
 
