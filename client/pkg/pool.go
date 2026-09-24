@@ -74,8 +74,8 @@ type clientPool struct {
 	mu    sync.RWMutex
 	conns map[string]*clientConnState
 
-	// [诊断] 预绑定竞速收帧统计：connID → 收到其 MsgSelectUplink 的通道列表。
-	// 计数挂在池级 map（不随预绑定状态删除），收帧窗口 400ms 后汇总打印一次并清理。
+	// [诊断] 预绑定竞速收帧统计：connID → 收到其 MsgSelectUplink 的通道列表（按通道去重）。
+	// 计数挂在池级 map（不随预绑定状态删除），收帧窗口 3s 后汇总打印一次并从 map 清理（防无界增长）。
 	prebindRacers map[string]*prebindRacer
 
 	relayCount int
@@ -1337,6 +1337,8 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 						}
 						pr2.logged = true
 						chs := append([]int(nil), pr2.chs...)
+						// 汇总打印后清理本次诊断条目，防止长期运行无界增长（GLM 复核 P1）
+						delete(p.prebindRacers, connIDCopy)
 						p.mu.Unlock()
 						log.Printf("[PairWarmer] 预绑定 %s 收帧汇总: 去重后 %d 条不同通道收到 MsgSelectUplink: %v",
 							common.ShortID(connIDCopy), len(chs), chs)
