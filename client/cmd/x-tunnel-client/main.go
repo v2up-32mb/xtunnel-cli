@@ -19,6 +19,8 @@ import (
 )
 
 func main() {
+	// 核心库静默，由壳接管全部日志输出
+	xtunnel.SetLogf(log.Printf)
 	log.Printf("[客户端] 程序启动")
 	flag.Parse()
 
