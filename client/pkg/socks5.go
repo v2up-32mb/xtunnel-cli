@@ -312,7 +312,12 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 	// reply success (BND.ADDR/BND.PORT ignored)
 	_, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	if err != nil {
+		// 回执写失败：本地客户端已断开，连接从未注册。
+		// 必须归还已预取的 Pair 引用，否则 refs 泄漏导致 Draining Pair 永不回收
 		_ = c.Close()
+		if p.pairWarmer != nil {
+			p.pairWarmer.ReleasePair(pair)
+		}
 		return
 	}
 

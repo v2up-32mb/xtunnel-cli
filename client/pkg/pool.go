@@ -909,6 +909,9 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 		st = p.conns[connID]
 		if st != nil {
 			st.pair = pair
+			// 热路径服务端提升时不再回发 MsgSelectUplink，必须在此预置上行通道，
+			// 否则 GetUplinkChannel 恒 false，全部上行数据退化为广播（对齐上游 v0.2.1）
+			st.uplink = pair.UplinkChID
 		}
 		p.mu.Unlock()
 		msg := common.EncodeMessage(common.MsgTCPConnect, connID, meta, first)
@@ -922,6 +925,7 @@ func (p *clientPool) RegisterAndBroadcastTCP(connID, target string, first []byte
 		p.mu.Lock()
 		if st = p.conns[connID]; st != nil {
 			st.pair = nil
+			st.uplink = 0
 		}
 		p.mu.Unlock()
 		p.pairWarmer.ReleasePair(pair)
