@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -27,7 +26,7 @@ func (p *clientPool) ListenHTTP(addr string) error {
 	if err != nil {
 		return fmt.Errorf("HTTP代理监听失败: %v", err)
 	}
-	log.Printf("[客户端] HTTP 代理: %s", h)
+	clientLogf("[客户端] HTTP 代理: %s", h)
 	cfgp := &ProxyConfig{Username: u, Password: pswd, Host: h}
 	go p.acceptProxyLoop(l, cfgp, p.handleHTTPProxyConn)
 	return nil

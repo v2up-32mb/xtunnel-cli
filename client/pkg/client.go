@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/google/uuid"
@@ -68,7 +67,7 @@ func (c *Client) Start() error {
 	c.pool.Start(relayNodes)
 
 	c.started = true
-	log.Printf("[客户端] 已启动")
+	clientLogf("[客户端] 已启动")
 	return nil
 }
 
@@ -85,7 +84,7 @@ func (c *Client) Shutdown() error {
 	c.pool.Shutdown()
 
 	c.started = false
-	log.Printf("[客户端] 已关闭")
+	clientLogf("[客户端] 已关闭")
 	return nil
 }
 
