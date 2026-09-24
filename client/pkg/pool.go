@@ -43,9 +43,12 @@ type clientConnState struct {
 	clientAddr string
 	closed     bool
 	pair       *HotChannelPair
-	// [诊断] 预绑定竞速参与统计：收到本预绑定 MsgSelectUplink 的通道计数与通道号列表
-	prebindSeen    int32
-	prebindSeenChs []int
+}
+
+// prebindRacer 预绑定竞速收帧统计（诊断用）
+type prebindRacer struct {
+	chs    []int // 收到该预绑定 MsgSelectUplink 的通道
+	logged bool  // 是否已输出汇总日志
 }
 
 // clientPool 客户端连接池
@@ -70,6 +73,10 @@ type clientPool struct {
 
 	mu    sync.RWMutex
 	conns map[string]*clientConnState
+
+	// [诊断] 预绑定竞速收帧统计：connID → 收到其 MsgSelectUplink 的通道列表。
+	// 计数挂在池级 map（不随预绑定状态删除），收帧窗口 400ms 后汇总打印一次并清理。
+	prebindRacers map[string]*prebindRacer
 
 	relayCount int
 	socks5Sem  chan struct{} // SOCKS5 连接信号量
@@ -1306,14 +1313,34 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 			}
 			p.noteUplink(connID, uplinkChID)
 
-			// [诊断] 预绑定竞速参与计数：每个收到 MsgSelectUplink 的通道都计一次并记录通道号
+			// [诊断] 预绑定竞速收帧统计：池级 map 计数，不受预绑定状态删除影响，
+			// 收帧窗口 400ms 后由 AfterFunc 汇总打印一次（每个 connID 仅一次）
 			isPrebind := strings.HasPrefix(connID, "prebind-") && !strings.Contains(connID, ".")
 			if isPrebind {
 				p.mu.Lock()
-				if st := p.conns[connID]; st != nil {
-					atomic.AddInt32(&st.prebindSeen, 1)
-					st.prebindSeenChs = append(st.prebindSeenChs, chID)
+				if p.prebindRacers == nil {
+					p.prebindRacers = make(map[string]*prebindRacer)
 				}
+				pr := p.prebindRacers[connID]
+				if pr == nil {
+					pr = &prebindRacer{}
+					p.prebindRacers[connID] = pr
+					connIDCopy := connID
+					time.AfterFunc(400*time.Millisecond, func() {
+						p.mu.Lock()
+						pr2 := p.prebindRacers[connIDCopy]
+						if pr2 == nil || pr2.logged {
+							p.mu.Unlock()
+							return
+						}
+						pr2.logged = true
+						chs := append([]int(nil), pr2.chs...)
+						p.mu.Unlock()
+						log.Printf("[PairWarmer] 预绑定 %s 收帧汇总: 共 %d 条通道收到 MsgSelectUplink: %v",
+							common.ShortID(connIDCopy), len(chs), chs)
+					})
+				}
+				pr.chs = append(pr.chs, chID)
 				p.mu.Unlock()
 			}
 
@@ -1341,16 +1368,8 @@ func (p *clientPool) handleChannel(chID int, conn *websocket.Conn) {
 				// 如果是预绑定请求（裸键 connID，无拨号后缀），通知 PairWarmer 完成 Pair 构建；
 				// 带后缀的拨号 connID 前缀相同但已脱离预热流程，不在此列
 				if p.pairWarmer != nil && isPrebind {
-					seen := int32(0)
-					var seenChs []int
-					p.mu.RLock()
-					if st := p.conns[connID]; st != nil {
-						seen = atomic.LoadInt32(&st.prebindSeen)
-						seenChs = append([]int(nil), st.prebindSeenChs...)
-					}
-					p.mu.RUnlock()
-					log.Printf("[PairWarmer] 预绑定竞速完成: 候选上行=%d 下行=%d, 收到 MsgSelectUplink 的通道[共%d]: %v, connID=%s",
-						uplinkChID, chosen, seen, seenChs, common.ShortID(connID))
+					log.Printf("[PairWarmer] 预绑定竞速完成: 候选上行=%d 下行=%d, connID=%s",
+						uplinkChID, chosen, common.ShortID(connID))
 					p.pairWarmer.HandlePrebindResult(connID, uplinkChID, chosen, nil)
 				}
 			}
