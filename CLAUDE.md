@@ -138,6 +138,11 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
       广播 MsgSelectUplink;其余帧在该 connID 状态下被忽略;轮次结束(客户端 done 或超时)
       立即注销。目标:轮次边界显式化、低延迟链路上不再依赖 5s 定时窗口、广播次数确定性为每轮 1 次。
       注意:属协议变更,需同步 win7-compat 客户端、上游 xtunnel 模块(升版/发版)与服务端,旧端需兼容兑底。
+- [ ] 服务端核心库化(C 方案):将 server/pkg 迁入上游 xtunnel 库(如 xtunnel/server 子包),与客户端核心
+      同样采用注入日志钩子(SetServerLogf,默认静默)、壳(xtunnel-cli/server/cmd)启动时 SetLogf 接管输出;
+      目标:服务端核心可复用、日志管理统一由壳负责、protocol+服务端核心同版本同步发版。
+      代价:全量迁移改 import + 日志收敛,三方回归;服务端核心与客户端核心同库导致发版耦合。
+      建议与 B 方案、协议变更一起排入 v0.3.0 演进批次。
 
 ## RelayNodeManager 实现说明
 
