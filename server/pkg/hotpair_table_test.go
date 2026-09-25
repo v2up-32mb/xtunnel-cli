@@ -31,8 +31,18 @@ func newWarmTestServer(t *testing.T) (*serverPool, *httptest.Server, *websocket.
 		ch1 := p.clientChConns["client-a"][1]
 		ch2 := p.clientChConns["client-a"][2]
 		p.mu.RUnlock()
-		if ch1 != nil && ch2 != nil && !ch1.closed && !ch2.closed {
-			break
+		if ch1 != nil && ch2 != nil {
+			// closed 由 wsConn.mu 保护（不能用 p.mu 读，避免与 close() 竞争）
+			var c1, c2 bool
+			ch1.mu.Lock()
+			c1 = ch1.closed
+			ch1.mu.Unlock()
+			ch2.mu.Lock()
+			c2 = ch2.closed
+			ch2.mu.Unlock()
+			if !c1 && !c2 {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("channels not registered in time")

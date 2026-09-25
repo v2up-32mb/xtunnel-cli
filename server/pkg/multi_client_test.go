@@ -54,7 +54,14 @@ func TestMultipleClientsCanShareSameChID(t *testing.T) {
 		namespaces = len(p.clientChConns)
 		active = 0
 		for _, wsConn := range p.wsConns {
-			if wsConn != nil && !wsConn.closed {
+			if wsConn == nil {
+				continue
+			}
+			// closed 由 wsConn.mu 保护（不能用 p.mu 读，避免与 close() 竞争）
+			wsConn.mu.Lock()
+			c := wsConn.closed
+			wsConn.mu.Unlock()
+			if !c {
 				active++
 			}
 		}

@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -115,7 +114,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 验证 Token
 	requestedProtocols := websocket.Subprotocols(r)
 	if len(requestedProtocols) == 0 || requestedProtocols[0] != p.token {
-		log.Printf("[服务端] 认证失败: 来自 %s", r.RemoteAddr)
+		srvLog(LevelWarn, "pool", "[服务端] 认证失败: 来自 %s", r.RemoteAddr)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -132,7 +131,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if chIDStr := queryParams.Get("ch_id"); chIDStr != "" {
 		_, err := fmt.Sscanf(chIDStr, "%d", &chID)
 		if err != nil || chID <= 0 || chID > maxAllowedChID {
-			log.Printf("[服务端] 无效的 ch_id 参数: %s", chIDStr)
+			srvLog(LevelWarn, "pool", "[服务端] 无效的 ch_id 参数: %s", chIDStr)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -142,7 +141,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		chID = p.allocClientChIDLocked(clientID)
 		p.mu.Unlock()
 		if chID == 0 {
-			log.Printf("[服务端] 拒绝客户端 %s: 该客户端通道编号已用尽", clientID)
+			srvLog(LevelWarn, "pool", "[服务端] 拒绝客户端 %s: 该客户端通道编号已用尽", clientID)
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
@@ -150,12 +149,12 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	totalActive, clientActive := p.countActiveChannels(clientID)
 	if p.config.MaxTotalChannels > 0 && totalActive >= p.config.MaxTotalChannels {
-		log.Printf("[服务端] 拒绝客户端 %s:总通道数已达上限 %d", clientID, p.config.MaxTotalChannels)
+		srvLog(LevelWarn, "pool", "[服务端] 拒绝客户端 %s:总通道数已达上限 %d", clientID, p.config.MaxTotalChannels)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 	if p.config.MaxChannelsPerClient > 0 && clientActive >= p.config.MaxChannelsPerClient {
-		log.Printf("[服务端] 拒绝客户端 %s:客户端通道数已达上限 %d", clientID, p.config.MaxChannelsPerClient)
+		srvLog(LevelWarn, "pool", "[服务端] 拒绝客户端 %s:客户端通道数已达上限 %d", clientID, p.config.MaxChannelsPerClient)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
@@ -164,7 +163,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := p.newUpgrader()
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[服务端] WebSocket 升级失败: %v", err)
+		srvLog(LevelWarn, "pool", "[服务端] WebSocket 升级失败: %v", err)
 		return
 	}
 
@@ -185,7 +184,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "channel limit reached"), time.Now().Add(p.config.WriteTimeout))
 		_ = ws.Close()
-		log.Printf("[服务端] 客户端 %s 在升级后命中通道上限，已关闭新通道", clientID)
+		srvLog(LevelWarn, "pool", "[服务端] 客户端 %s 在升级后命中通道上限，已关闭新通道", clientID)
 		return
 	}
 	// 检查 ch_id 是否已被该客户端自身的活跃连接占用，防止通道劫持。
@@ -195,7 +194,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "channel id in use"), time.Now().Add(p.config.WriteTimeout))
 		_ = ws.Close()
-		log.Printf("[服务端] 拒绝客户端 %s: ch_id %d 已被该客户端占用", clientID, chID)
+		srvLog(LevelWarn, "pool", "[服务端] 拒绝客户端 %s: ch_id %d 已被该客户端占用", clientID, chID)
 		return
 	}
 	if p.clientChConns[clientID] == nil {
@@ -205,7 +204,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	p.wsConns = append(p.wsConns, wsConn)
 	p.mu.Unlock()
 
-	log.Printf("[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
+	srvLog(LevelInfo, "pool", "[服务端] 通道 %d 已连接, 客户端: %s", chID, clientID)
 
 	// 启动写入协程
 	wsConn.start()
@@ -213,7 +212,7 @@ func (p *serverPool) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 启动读取循环
 	wsConn.readLoop()
 
-	log.Printf("[服务端] 通道 %d 已断开", chID)
+	srvLog(LevelInfo, "pool", "[服务端] 通道 %d 已断开", chID)
 }
 
 func (p *serverPool) countActiveChannels(clientID string) (total int, clientTotal int) {
@@ -288,7 +287,7 @@ func (p *serverPool) handleMessage(clientID string, chID int, rawLen int, msgTyp
 	// 反向连接拦截：优先处理反向连接表中的 connID（属于其他客户端的同名 connID 直接丢弃，不落入正向逻辑）
 	if rc := p.getReverseConn(connID); rc != nil {
 		if rc.ownerClientID != clientID {
-			log.Printf("[服务端] 警告: 客户端 %s 试图操作其他客户端的反向连接 %s, 忽略", protocol.ShortID(clientID), protocol.ShortID(connID))
+			srvLog(LevelWarn, "pool", "[服务端] 警告: 客户端 %s 试图操作其他客户端的反向连接 %s, 忽略", protocol.ShortID(clientID), protocol.ShortID(connID))
 			return
 		}
 		p.handleReverseMessage(clientID, chID, msgType, connID, meta, payload)
@@ -529,7 +528,7 @@ func (p *serverPool) unregisterConn(connID string) {
 		d = fmt.Sprintf("%d", down)
 	}
 
-	log.Printf("[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
+	srvLog(LevelInfo, "pool", "[服务端] %s 访问: %s, 通道: TX %s RX %s, ID:%s, 已关闭",
 		clientAddr, target, u, d, protocol.ShortID(connID))
 }
 
@@ -600,7 +599,7 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 		if protocol.BackpressureState(atomic.LoadInt32(&p.backpressureState)) != protocol.BackpressurePause {
 			atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressurePause))
 			p.broadcastBackpressure(protocol.BackpressurePause)
-			log.Printf("[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+			srvLog(LevelWarn, "pool", "[服务端] 背压通知: 暂停 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		}
 		return
 	}
@@ -611,7 +610,7 @@ func (p *serverPool) updateBackpressureState(newSize int64) {
 			if atomic.CompareAndSwapInt32(&p.backpressureCooldown, 0, 1) {
 				atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
 				p.broadcastBackpressure(protocol.BackpressureSlowDown)
-				log.Printf("[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+				srvLog(LevelWarn, "pool", "[服务端] 背压通知: 减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 				go func() {
 					time.Sleep(1 * time.Second)
 					atomic.StoreInt32(&p.backpressureCooldown, 0)
@@ -645,7 +644,7 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressurePause && newSize < limit*3/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
 		p.broadcastBackpressure(protocol.BackpressureNormal)
-		log.Printf("[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 直接恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 
@@ -653,7 +652,7 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressurePause && newSize < limit*9/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureSlowDown))
 		p.broadcastBackpressure(protocol.BackpressureSlowDown)
-		log.Printf("[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 从暂停恢复到减速 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 
@@ -661,7 +660,7 @@ func (p *serverPool) removeQueueBytes(size int) {
 	if currentState == protocol.BackpressureSlowDown && newSize < limit*7/10 {
 		atomic.StoreInt32(&p.backpressureState, int32(protocol.BackpressureNormal))
 		p.broadcastBackpressure(protocol.BackpressureNormal)
-		log.Printf("[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
+		srvLog(LevelInfo, "pool", "[服务端] 背压通知: 恢复正常 (队列: %d/%d bytes, %.1f%%)", newSize, limit, float64(newSize)*100/float64(limit))
 		return
 	}
 }

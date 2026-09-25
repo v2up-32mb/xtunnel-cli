@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -43,14 +42,14 @@ func NewServer(cfg *Config) (*Server, error) {
 
 	// 准备 TLS 证书
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
-		log.Printf("[服务端] 使用指定证书: %s", cfg.CertFile)
+		srvLog(LevelInfo, "server", "[服务端] 使用指定证书: %s", cfg.CertFile)
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("加载证书失败: %v", err)
 		}
 		s.cert = cert
 	} else if cfg.AutoCert {
-		log.Printf("[服务端] 自动生成自签证书")
+		srvLog(LevelInfo, "server", "[服务端] 自动生成自签证书")
 		cert, err := GenerateSelfSignedCert()
 		if err != nil {
 			return nil, fmt.Errorf("生成证书失败: %v", err)
@@ -91,15 +90,15 @@ func (s *Server) Start() error {
 
 	// 启动服务器（在 goroutine 中）
 	go func() {
-		log.Printf("[服务端] HTTPS 监听: %s", s.config.ListenAddr)
-		log.Printf("[服务端] Token: %s", s.config.Token)
+		srvLog(LevelInfo, "server", "[服务端] HTTPS 监听: %s", s.config.ListenAddr)
+		srvLog(LevelInfo, "server", "[服务端] Token: %s", s.config.Token)
 		if err := s.httpSrv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
-			log.Printf("[服务端] 启动失败: %v", err)
+			srvLog(LevelError, "server", "[服务端] 启动失败: %v", err)
 		}
 	}()
 
 	s.started = true
-	log.Printf("[服务端] 已启动")
+	srvLog(LevelInfo, "server", "[服务端] 已启动")
 	return nil
 }
 
@@ -122,7 +121,7 @@ func (s *Server) Shutdown() error {
 	s.pool.Shutdown()
 
 	s.started = false
-	log.Printf("[服务端] 已关闭")
+	srvLog(LevelInfo, "server", "[服务端] 已关闭")
 	return nil
 }
 

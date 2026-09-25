@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"sync"
 	"time"
 
@@ -62,7 +61,7 @@ func (t *HotPairTable) HandleNotify(clientID string, payload []byte) {
 		}
 		m[e.Key] = &HotPairEntry{Key: e.Key, ChA: e.ChA, ChB: e.ChB, At: now}
 	}
-	log.Printf("[HotPair] 收到客户端 %s 预热通道对通知 (%d 条)，在表 %d 条",
+	srvLog(LevelInfo, "hotpair_table", "[HotPair] 收到客户端 %s 预热通道对通知 (%d 条)，在表 %d 条",
 		protocol.ShortID(clientID), len(entries), len(m))
 }
 

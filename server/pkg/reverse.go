@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"sync/atomic"
 	"time"
@@ -106,11 +105,11 @@ func (d *reverseDialer) DialStream(ctx context.Context, target string) (net.Conn
 		atomic.StoreInt32(&rc.sendCh, int32(entry.ChB)) // 服务端发包通道（server→client）
 		atomic.StoreInt32(&rc.recvCh, int32(entry.ChA)) // 服务端收包通道（client→server）
 		rc.pairPreset = true
-		log.Printf("[服务端] 反向拨号走预热 Pair (键:%s ChA:%d ChB:%d)，客户端 %s，ID:%s",
+		srvLog(LevelDebug, "reverse", "[服务端] 反向拨号走预热 Pair (键:%s ChA:%d ChB:%d)，客户端 %s，ID:%s",
 			protocol.ShortID(entry.Key), entry.ChA, entry.ChB, protocol.ShortID(d.clientID), protocol.ShortID(connID))
 		if err := d.pool.sendToChannel(d.clientID, entry.ChB, websocket.BinaryMessage, msg); err != nil {
 			// Pair 通道已失效：废弃该通道全部表项并回退广播竞争
-			log.Printf("[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", entry.ChB, err)
+			srvLog(LevelWarn, "reverse", "[服务端] Hot Pair 通道 %d 发送失败，回退广播: %v", entry.ChB, err)
 			d.pool.hotPairs.InvalidateChannel(entry.ChB)
 			entry = nil
 		}
@@ -221,7 +220,7 @@ func (p *serverPool) handleReverseMessage(clientID string, chID int, msgType pro
 			binary.BigEndian.PutUint32(downMeta, uint32(chID))
 			_ = p.sendToChannel(clientID, int(clientRecv), websocket.BinaryMessage,
 				protocol.EncodeMessage(protocol.MsgSelectDownlink, connID, downMeta, nil))
-			log.Printf("[服务端] 反向连接 %s 兜底修复：采用客户端重新选路通道 (发包:%d 收包:%d)",
+			srvLog(LevelDebug, "reverse", "[服务端] 反向连接 %s 兜底修复：采用客户端重新选路通道 (发包:%d 收包:%d)",
 				protocol.ShortID(connID), clientRecv, chID)
 		}
 

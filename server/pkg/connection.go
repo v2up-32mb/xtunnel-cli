@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -87,9 +86,9 @@ func (wsConn *ServerWSConn) readLoop() {
 		mt, msg, err := wsConn.ws.ReadMessage()
 		if err != nil {
 			if !protocol.IsNormalCloseError(err) {
-				log.Printf("[服务端] 通道 %d 读取消息失败: %v", wsConn.chID, err)
+				srvLog(LevelWarn, "connection", "[服务端] 通道 %d 读取消息失败: %v", wsConn.chID, err)
 			} else {
-				log.Printf("[服务端] 通道 %d 正常关闭: %v", wsConn.chID, err)
+				srvLog(LevelInfo, "connection", "[服务端] 通道 %d 正常关闭: %v", wsConn.chID, err)
 			}
 			return
 		}
@@ -150,13 +149,13 @@ func (wsConn *ServerWSConn) writeLoop() {
 				wsConn.pool.removeQueueBytes(task.size)
 			}
 			if err := wsConn.writeDirect(task.msgType, task.data); err != nil {
-				log.Printf("[服务端] 通道 %d 写消息失败: %v", wsConn.chID, err)
+				srvLog(LevelWarn, "connection", "[服务端] 通道 %d 写消息失败: %v", wsConn.chID, err)
 				wsConn.close()
 				return
 			}
 		case <-ticker.C:
 			if err := wsConn.writeDirect(websocket.PingMessage, []byte{}); err != nil {
-				log.Printf("[服务端] 通道 %d ping发送失败: %v", wsConn.chID, err)
+				srvLog(LevelWarn, "connection", "[服务端] 通道 %d ping发送失败: %v", wsConn.chID, err)
 				wsConn.close()
 				return
 			}

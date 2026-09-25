@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 
@@ -118,7 +117,7 @@ func (m *ReverseListenerManager) HandleReverseListen(clientID string, chID int, 
 		listenerID: listenerID,
 		server:     srv,
 	}
-	log.Printf("[服务端] 反向监听已开启: %s (客户端 %s)", specStr, protocol.ShortID(clientID))
+	srvLog(LevelInfo, "reverse_listener", "[服务端] 反向监听已开启: %s (客户端 %s)", specStr, protocol.ShortID(clientID))
 	m.reply(clientID, chID, listenerID, protocol.StatusOK, "")
 }
 
@@ -144,7 +143,7 @@ func (m *ReverseListenerManager) ShutdownClient(clientID string) {
 			}
 		}
 		delete(m.clients, clientID)
-		log.Printf("[服务端] 反向监听已关闭: 客户端 %s", protocol.ShortID(clientID))
+		srvLog(LevelInfo, "reverse_listener", "[服务端] 反向监听已关闭: 客户端 %s", protocol.ShortID(clientID))
 	}
 }
 

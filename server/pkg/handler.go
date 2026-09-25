@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/binary"
 	"io"
-	"log"
 	"net"
 	"time"
 
@@ -71,14 +70,14 @@ func (p *serverPool) handleTCPConnect(clientID string, chID int, connID string, 
 					st.downlinkChID = e.ChB
 					st.mu.Unlock()
 					promoted = true
-					log.Printf("[服务端] %s 访问: %s, 通道: TX %d RX %d (预热 Pair 提升, 键:%s), ID:%s",
+					srvLog(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d RX %d (预热 Pair 提升, 键:%s), ID:%s",
 						st.clientAddr, target, chID, e.ChB, protocol.ShortID(e.Key), protocol.ShortID(connID))
 				}
 			}
 		}
 		if !promoted {
 			_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
-			log.Printf("[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
+			srvLog(LevelInfo, "handler", "[服务端] %s 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
 		}
 
 		// 异步连接目标服务器
@@ -104,7 +103,7 @@ func (p *serverPool) connectTarget(st *ServerConnState) {
 	// 连接到目标
 	conn, err := net.DialTimeout("tcp", resolvedTarget, p.connectTimeout())
 	if err != nil {
-		log.Printf("[服务端] 连接目标失败 %s: %v", st.target, err)
+		srvLog(LevelWarn, "handler", "[服务端] 连接目标失败 %s: %v", st.target, err)
 		p.sendDownlink(st.connID, protocol.MsgConnStatus, []byte{byte(protocol.StatusERR)}, nil)
 		// 补发 MsgTCPClose 通知客户端清理，避免半开连接
 		p.sendDownlink(st.connID, protocol.MsgTCPClose, nil, nil)
@@ -127,7 +126,7 @@ func (p *serverPool) connectTarget(st *ServerConnState) {
 	st.pendingData = nil
 	st.mu.Unlock()
 
-	log.Printf("[服务端] %s 连接目标成功 %s, ID:%s", st.clientAddr, st.target, protocol.ShortID(st.connID))
+	srvLog(LevelInfo, "handler", "[服务端] %s 连接目标成功 %s, ID:%s", st.clientAddr, st.target, protocol.ShortID(st.connID))
 
 	// 发送连接成功（广播）
 	_ = p.sendDownlink(st.connID, protocol.MsgConnStatus, []byte{byte(protocol.StatusOK)}, nil)
@@ -136,7 +135,7 @@ func (p *serverPool) connectTarget(st *ServerConnState) {
 	if len(pending) > 0 {
 		for _, data := range pending {
 			if _, err := conn.Write(data); err != nil {
-				log.Printf("[服务端] 写入缓存数据失败 %s: %v", st.target, err)
+				srvLog(LevelWarn, "handler", "[服务端] 写入缓存数据失败 %s: %v", st.target, err)
 				p.unregisterConn(st.connID)
 				return
 			}
@@ -180,7 +179,7 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 			}
 			if currentSize+len(payload) > pendingDataMaxSize {
 				st.mu.Unlock()
-				log.Printf("[服务端] pendingData 超出限制 %d bytes, 拒绝连接 ID:%s", pendingDataMaxSize, protocol.ShortID(connID))
+				srvLog(LevelWarn, "handler", "[服务端] pendingData 超出限制 %d bytes, 拒绝连接 ID:%s", pendingDataMaxSize, protocol.ShortID(connID))
 				p.unregisterConn(connID)
 				return
 			}
@@ -194,7 +193,7 @@ func (p *serverPool) handleTCPData(chID int, connID string, payload []byte) {
 
 	_, err := targetConn.Write(payload)
 	if err != nil {
-		log.Printf("[服务端] 写入目标失败 %s: %v", st.target, err)
+		srvLog(LevelWarn, "handler", "[服务端] 写入目标失败 %s: %v", st.target, err)
 		p.unregisterConn(connID)
 	}
 }
@@ -222,7 +221,7 @@ func (p *serverPool) handleSelectDownlink(clientID string, chID int, connID stri
 
 	// 验证下行通道是否仍然活跃
 	if wsConn == nil || wsConn.closed {
-		log.Printf("[服务端] 警告: 客户端尝试选择已关闭的通道 %d 作为下行通道, connID:%s", downlinkChID, protocol.ShortID(connID))
+		srvLog(LevelWarn, "handler", "[服务端] 警告: 客户端尝试选择已关闭的通道 %d 作为下行通道, connID:%s", downlinkChID, protocol.ShortID(connID))
 		return
 	}
 
@@ -233,12 +232,12 @@ func (p *serverPool) handleSelectDownlink(clientID string, chID int, connID stri
 	st.mu.RUnlock()
 
 	if uplinkChID > 0 && chID != uplinkChID {
-		log.Printf("[服务端] 警告: MsgSelectDownlink 来自通道 %d,但上行通道是 %d, ID:%s,忽略",
+		srvLog(LevelWarn, "handler", "[服务端] 警告: MsgSelectDownlink 来自通道 %d,但上行通道是 %d, ID:%s,忽略",
 			chID, uplinkChID, protocol.ShortID(connID))
 		return
 	}
 	if ownerID != "" && wsConn.clientID != "" && wsConn.clientID != ownerID {
-		log.Printf("[服务端] 警告: 客户端 %s 试图选择其他客户端 %s 的通道 %d 作为下行通道, connID:%s",
+		srvLog(LevelWarn, "handler", "[服务端] 警告: 客户端 %s 试图选择其他客户端 %s 的通道 %d 作为下行通道, connID:%s",
 			ownerID, wsConn.clientID, downlinkChID, protocol.ShortID(connID))
 		return
 	}
@@ -248,7 +247,7 @@ func (p *serverPool) handleSelectDownlink(clientID string, chID int, connID stri
 		st.downlinkChID = downlinkChID
 	} else {
 		// 已经选择过下行通道,但收到另一个选择请求
-		log.Printf("[服务端] 警告: %s 访问: %s, 当前下行通道 %d, 试图改为 %d, ID:%s,忽略",
+		srvLog(LevelWarn, "handler", "[服务端] 警告: %s 访问: %s, 当前下行通道 %d, 试图改为 %d, ID:%s,忽略",
 			st.clientAddr, st.target, st.downlinkChID, downlinkChID, protocol.ShortID(connID))
 	}
 	st.mu.Unlock()
@@ -327,7 +326,7 @@ func (p *serverPool) forwardTargetToClient(st *ServerConnState) {
 		if err != nil {
 			// 检查是否是连接被其他 goroutine 关闭（正常情况）
 			if err != io.EOF && !protocol.IsNormalCloseError(err) {
-				log.Printf("[服务端] 读取目标错误 %s: %v", st.target, err)
+				srvLog(LevelWarn, "handler", "[服务端] 读取目标错误 %s: %v", st.target, err)
 			}
 			return
 		}
@@ -370,7 +369,7 @@ func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, 
 	// 创建 UDP socket
 	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		log.Printf("[服务端] 创建 UDP 失败: %v", err)
+		srvLog(LevelError, "handler", "[服务端] 创建 UDP 失败: %v", err)
 		p.sendDownlink(connID, protocol.MsgConnStatus, []byte{byte(protocol.StatusERR)}, nil)
 		return
 	}
@@ -402,7 +401,7 @@ func (p *serverPool) handleUDPConnect(clientID string, chID int, connID string, 
 	binary.BigEndian.PutUint32(uplinkChIDBytes, uint32(chID))
 	_ = p.sendDownlink(connID, protocol.MsgSelectUplink, uplinkChIDBytes, nil)
 
-	log.Printf("[服务端] %s UDP 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
+	srvLog(LevelInfo, "handler", "[服务端] %s UDP 访问: %s, 通道: TX %d, ID:%s", st.clientAddr, target, chID, protocol.ShortID(connID))
 
 	// 启动 UDP 接收
 	go p.forwardUDPToClient(st)
@@ -442,14 +441,14 @@ func (p *serverPool) handleUDPData(chID int, connID string, meta, payload []byte
 	// 解析 UDP 地址
 	udpAddr, err := net.ResolveUDPAddr("udp", resolvedTarget)
 	if err != nil {
-		log.Printf("[服务端] 解析 UDP 地址失败 %s: %v", targetAddr, err)
+		srvLog(LevelWarn, "handler", "[服务端] 解析 UDP 地址失败 %s: %v", targetAddr, err)
 		return
 	}
 
 	// 发送 UDP 包
 	_, err = st.targetUDP.WriteToUDP(payload, udpAddr)
 	if err != nil {
-		log.Printf("[服务端] 发送 UDP 失败: %v", err)
+		srvLog(LevelWarn, "handler", "[服务端] 发送 UDP 失败: %v", err)
 	}
 }
 
