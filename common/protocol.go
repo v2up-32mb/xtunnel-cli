@@ -29,6 +29,7 @@ const (
 	// 客户端→服务端：批量预热通道对通知（健康维护由客户端负责），
 	// payload 为 HotPairInfo 记录序列；旧服务端无此 case 自动忽略
 	MsgHotPairNotify MessageType = 0x22
+	MsgHotPairBegin  MessageType = 0x23 // 显式预绑定轮次开始(B 方案)
 )
 
 // PrebindTarget 预绑定目标标识
