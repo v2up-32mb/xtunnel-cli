@@ -18,10 +18,35 @@ import (
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
+// renderXtunnelLog 壳接管核心库日志：按等级/模块渲染
+func renderXtunnelLog(ev xtunnel.LogEvent) {
+	level := "DEBUG"
+	switch ev.Level {
+	case xtunnel.LevelInfo:
+		level = "INFO"
+	case xtunnel.LevelWarn:
+		level = "WARN"
+	case xtunnel.LevelError:
+		level = "ERROR"
+	}
+	log.Printf("[%s][%s] %s", level, ev.Module, fmt.Sprintf(ev.Format, ev.Args...))
+}
+
+// shellLog 壳自身日志：与核心事件统一显示风格 [等级][shell] 消息
+func shellLog(level string, format string, args ...any) {
+	log.Printf("[%s][shell] %s", level, fmt.Sprintf(format, args...))
+}
+
+// shellFatalf 壳自身致命错误：ERROR 级日志后退出
+func shellFatalf(format string, args ...any) {
+	shellLog("ERROR", format, args...)
+	os.Exit(1)
+}
+
 func main() {
-	// 核心库静默，由壳接管全部日志输出
-	xtunnel.SetLogf(log.Printf)
-	log.Printf("[客户端] 程序启动")
+	// 核心库静默，由壳接管全部日志输出（等级/模块/格式由壳决定）
+	xtunnel.SetLogf(renderXtunnelLog)
+	shellLog("INFO", "[客户端] 程序启动")
 	flag.Parse()
 
 	cfg := parseFlags()
@@ -32,7 +57,7 @@ func main() {
 		geoSitePathResolved := resolveGeoPath(geoSitePath, "geosite.dat")
 		m, err := xsharedrouting.NewMatcherWithGeoFile(bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, bypassRules, geoIPPathResolved, geoSitePathResolved)
 		if err != nil {
-			log.Fatalf("[客户端] 构建路由绕过 matcher 失败: %v", err)
+			shellFatalf("[客户端] 构建路由绕过 matcher 失败: %v", err)
 		}
 		bypassMatcher = m
 		geoLoaded := ""
@@ -45,24 +70,24 @@ func main() {
 		if geoLoaded == "" {
 			geoLoaded = "使用内置数据"
 		}
-		log.Printf("[客户端] 路由绕过已启用: private=%v geoip-cn=%v geosite-cn=%v rules=%q | %s", bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, bypassRules, strings.TrimSpace(geoLoaded))
+		shellLog("INFO", "[客户端] 路由绕过已启用: private=%v geoip-cn=%v geosite-cn=%v rules=%q | %s", bypassPrivate, bypassGeoIPCN, bypassGeoSiteCN, bypassRules, strings.TrimSpace(geoLoaded))
 	}
 
 	c, err := xtunnel.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("[客户端] 创建客户端失败: %v", err)
+		shellFatalf("[客户端] 创建客户端失败: %v", err)
 	}
 
 	// 先解析并校验本地监听地址，避免连接池已启动后才发现地址非法
 	listenAddrs := parseListenAddrs()
 
 	if err := c.Start(); err != nil {
-		log.Fatalf("[客户端] 启动客户端失败: %v", err)
+		shellFatalf("[客户端] 启动客户端失败: %v", err)
 	}
 	defer c.Shutdown()
 
 	if reverseMode {
-		log.Printf("[客户端] 反向模式：监听将由服务端按 -l 参数开启")
+		shellLog("INFO", "[客户端] 反向模式：监听将由服务端按 -l 参数开启")
 	} else {
 		// 启动本地代理监听器
 		for _, addr := range listenAddrs {
@@ -79,19 +104,19 @@ func main() {
 				}
 				if err != nil {
 					// 监听失败（端口占用/协议错误）为致命错误，直接退出
-					log.Fatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
+					shellFatalf("[客户端] 监听器启动失败 (%s): %v", a, err)
 				}
 			}()
 		}
 	}
 
-	log.Printf("[客户端] 已启动,等待连接...")
+	shellLog("INFO", "[客户端] 已启动,等待连接...")
 
 	// 等待信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
-	log.Println("[客户端] 收到退出信号,正在关闭...")
+	shellLog("INFO", "[客户端] 收到退出信号,正在关闭...")
 }
 
 func init() {
@@ -166,7 +191,7 @@ var bypassMatcher *xsharedrouting.Matcher
 
 func parseFlags() *xtunnel.Config {
 	if err := applyClientFileConfig(configFile, visitedFlags()); err != nil {
-		log.Fatalf("[客户端] 读取配置文件失败: %v", err)
+		shellFatalf("[客户端] 读取配置文件失败: %v", err)
 	}
 	if listenAddr == "" || forwardAddr == "" {
 		flag.Usage()
@@ -205,9 +230,9 @@ func parseFlags() *xtunnel.Config {
 		var err error
 		ipStrategy, err = protocol.ParseIPStrategy(ips)
 		if err != nil {
-			log.Printf("[客户端] IP 策略解析失败: %v,使用默认策略", err)
+			shellLog("WARN", "[客户端] IP 策略解析失败: %v,使用默认策略", err)
 		} else {
-			log.Printf("[客户端] IP 访问策略: %s (code: %d)", ips, ipStrategy)
+			shellLog("INFO", "[客户端] IP 访问策略: %s (code: %d)", ips, ipStrategy)
 		}
 	}
 
@@ -216,7 +241,7 @@ func parseFlags() *xtunnel.Config {
 	if insecure {
 		if !fallback {
 			fallback = true
-			log.Printf("[客户端] 启用 -insecure:已自动禁用 ECH（fallback）")
+			shellLog("INFO", "[客户端] 启用 -insecure:已自动禁用 ECH（fallback）")
 		}
 		enableECH = false
 	}
@@ -246,13 +271,13 @@ func parseFlags() *xtunnel.Config {
 	if reverseMode {
 		cfg.ReverseListeners = parseListenAddrs()
 		cfg.OnReverseError = func(err error) {
-			log.Fatalf("[客户端] %v", err)
+			shellFatalf("[客户端] %v", err)
 		}
 	}
 
 	// 生成并复用客户端 ID
 	cfg.ClientID = uuid.NewString()
-	log.Printf("[客户端] 客户端ID: %s", cfg.ClientID)
+	shellLog("INFO", "[客户端] 客户端ID: %s", cfg.ClientID)
 
 	return cfg
 }
@@ -270,7 +295,7 @@ func parseListenAddrs() []string {
 			continue
 		}
 		if !strings.HasPrefix(l, "socks5://") && !strings.HasPrefix(l, "http://") {
-			log.Fatalf("[客户端] 仅支持 SOCKS5/HTTP 监听:非法监听地址 %q", l)
+			shellFatalf("[客户端] 仅支持 SOCKS5/HTTP 监听:非法监听地址 %q", l)
 		}
 		listeners = append(listeners, l)
 	}
