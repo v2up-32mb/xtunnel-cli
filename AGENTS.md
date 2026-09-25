@@ -149,6 +149,10 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
       目标:服务端核心可复用、日志管理统一由壳负责、protocol+服务端核心同版本同步发版。
       代价:全量迁移改 import,三方回归;与客户端核心同库导致发版耦合。
       建议与 B 方案、协议变更一起排入 v0.3.0 演进批次。
+- [ ] 结构化领域事件(方向 2):在日志事件基础上提供结构化字段(连接事件: ID/Target/通道/State/流量,
+      HotPair 事件: 键/上下行/promoted/回退,池事件: 通道上下线/背压档位),壳可统计/过滤而不解析字符串;
+      保留字符串渲染兼容(事件可派生 Message),既有 LogEvent 契约不破坏;推荐排 v0.3.1,可与 B 并行。
+- 完整 v0.3.0 编排(顺序/协议草案/验收/发布红线)见上游 `xtunnel/AGENTS.md`「v0.3.0 规划」,新会话开工先读那里。
 
 ## RelayNodeManager 实现说明
 
