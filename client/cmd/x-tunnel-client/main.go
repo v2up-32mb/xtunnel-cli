@@ -16,9 +16,23 @@ import (
 	"x-tunnel/common"
 )
 
+// renderClientLog 壳接管核心库日志：按等级/模块渲染
+func renderClientLog(ev client.LogEvent) {
+	level := "DEBUG"
+	switch ev.Level {
+	case client.LevelInfo:
+		level = "INFO"
+	case client.LevelWarn:
+		level = "WARN"
+	case client.LevelError:
+		level = "ERROR"
+	}
+	log.Printf("[%s][%s] %s", level, ev.Module, fmt.Sprintf(ev.Format, ev.Args...))
+}
+
 func main() {
-	// 核心库静默，由壳接管全部日志输出
-	client.SetLogf(log.Printf)
+	// 核心库静默，由壳接管全部日志输出（等级/模块/格式由壳决定）
+	client.SetLogf(renderClientLog)
 	log.Printf("[客户端] 程序启动")
 	flag.Parse()
 

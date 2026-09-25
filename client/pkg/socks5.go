@@ -127,7 +127,7 @@ func (p *clientPool) ListenSOCKS5(addr string) error {
 	if err != nil {
 		return fmt.Errorf("SOCKS5监听失败: %v", err)
 	}
-	clientLogf("[客户端] SOCKS5 代理: %s", h)
+	clientLog(LevelInfo, "socks5", "[客户端] SOCKS5 代理: %s", h)
 	cfgp := &ProxyConfig{Username: u, Password: pswd, Host: h}
 
 	go func() {
@@ -168,7 +168,7 @@ func (p *clientPool) acquireProxySlot(c net.Conn, name string, cfgp *ProxyConfig
 			handler(conn, cfgp)
 		}(c)
 	case <-time.After(softLimitWait):
-		clientLogf("[客户端] %s 并发连接数已达上限 (%d)，拒绝新连接，请稍后重试", name, cap(p.socks5Sem))
+		clientLog(LevelWarn, "socks5", "[客户端] %s 并发连接数已达上限 (%d)，拒绝新连接，请稍后重试", name, cap(p.socks5Sem))
 		_ = c.Close()
 	}
 }
@@ -338,7 +338,7 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 			// 连接成功，继续正常处理
 		case <-time.After(p.connectTimeout()):
 			// 连接超时，发送错误响应并关闭连接
-			clientLogf("[客户端] SOCKS5 连接 %s 超时", target)
+			clientLog(LevelWarn, "socks5", "[客户端] SOCKS5 连接 %s 超时", target)
 			_, _ = c.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 			_ = c.Close()
 			p.Unregister(connID)
@@ -365,7 +365,7 @@ func (p *clientPool) handleSOCKS5Connect(c net.Conn, cfgp *ProxyConfig, target s
 		}
 		if chID, ok := p.GetUplinkChannel(connID); ok {
 			if err := p.SendDataDirect(chID, connID, buf[:n]); err != nil {
-				clientLogf("[客户端] 发送数据失败: %v, ID:%s", err, common.ShortID(connID))
+				clientLog(LevelWarn, "socks5", "[客户端] 发送数据失败: %v, ID:%s", err, common.ShortID(connID))
 				return
 			}
 		} else {
