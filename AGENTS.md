@@ -143,9 +143,9 @@ go build -tags client -o x-tunnel-client x-tunnel-client.go client_*.go ip_strat
       广播 MsgSelectUplink;其余帧在该 connID 状态下被忽略;轮次结束(客户端 done 或超时)
       立即注销。目标:轮次边界显式化、低延迟链路上不再依赖 5s 定时窗口、广播次数确定性为每轮 1 次。
       注意:属协议变更,需同步 win7-compat 客户端、上游 xtunnel 模块(升版/发版)与服务端,旧端需兼容兑底。
-- [ ] 服务端核心库化(C 方案):将 server/pkg 迁入上游 xtunnel 库(如 xtunnel/server 子包)。✅ 迁移已完成:
-      上游 server/ 子包已落地(6c9d78c,go test -race 全绿),壳本地 replace 验证编译/测试/二进制全通过;
-      正式切换(删本地 server/pkg + 壳改 import + go.mod 升版)随 v0.3.0 发布执行,当前服务端保持本地依赖运行。
+- [x] 服务端核心化(C 方案):✅ 已随 v0.3.0 正式落地——服务端代码已按架构并入上游 xtunnel 根包
+      (统一核心库,无 server/ 子包),通用能力已上移 xshared v0.1.1(纯协议核心);
+      CLI 已删除本地 server/pkg,壳/示例全面切至 xtunnel v0.3.0(0270b53),服务端已部署运行。
 - [ ] 结构化领域事件(方向 2):在日志事件基础上提供结构化字段(连接事件: ID/Target/通道/State/流量,
       HotPair 事件: 键/上下行/promoted/回退,池事件: 通道上下线/背压档位),壳可统计/过滤而不解析字符串;
       保留字符串渲染兼容(事件可派生 Message),既有 LogEvent 契约不破坏;推荐排 v0.3.1,可与 B 并行。
