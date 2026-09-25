@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"x-tunnel/server/pkg"
+	"github.com/v2up-32mb/xtunnel"
 )
 
 func main() {
@@ -23,7 +23,7 @@ func main() {
 		WriteBufferSize:  64 * 1024,
 	}
 
-	s, err := server.NewServer(cfg)
+	s, err := xtunnel.NewServer(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}

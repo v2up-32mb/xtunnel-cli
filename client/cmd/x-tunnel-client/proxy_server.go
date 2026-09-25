@@ -11,7 +11,7 @@ import (
 // 数据面由库适配器提供：c.ProxyDialer() 同时具备 TCP 流与 UDP ASSOCIATE 能力；
 // 鉴权（RFC1929）与 UDP 端口拦截由 xshared 服务器侧处理。
 func startSocks5Listener(addr string, c *xtunnel.Client) error {
-	host, user, pass, err := xtunnel.ParseSocks5Auth(addr)
+	host, user, pass, err := xsharedsocks5.ParseSocks5Auth(addr)
 	if err != nil {
 		return err
 	}
@@ -19,7 +19,7 @@ func startSocks5Listener(addr string, c *xtunnel.Client) error {
 	opts := []xsharedsocks5.Option{}
 	if user != "" || pass != "" {
 		opts = append(opts, xsharedsocks5.WithUserPassAuth(func(u, p string) bool {
-			return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+			return xsharedsocks5.AuthEqual(u, user) && xsharedsocks5.AuthEqual(p, pass)
 		}))
 	}
 	if maxSOCKS5Connections > 0 {
@@ -36,7 +36,7 @@ func startSocks5Listener(addr string, c *xtunnel.Client) error {
 
 // startHTTPListener 以共享 HTTP 代理服务器承接本地监听（CONNECT 隧道 + 普通代理）。
 func startHTTPListener(addr string, c *xtunnel.Client) error {
-	host, user, pass, err := xtunnel.ParseSocks5Auth(addr)
+	host, user, pass, err := xsharedsocks5.ParseSocks5Auth(addr)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func startHTTPListener(addr string, c *xtunnel.Client) error {
 	opts := []xsharedhttpproxy.Option{}
 	if user != "" || pass != "" {
 		opts = append(opts, xsharedhttpproxy.WithUserPassAuth(func(u, p string) bool {
-			return xtunnel.AuthEqual(u, user) && xtunnel.AuthEqual(p, pass)
+			return xsharedsocks5.AuthEqual(u, user) && xsharedsocks5.AuthEqual(p, pass)
 		}))
 	}
 	if maxSOCKS5Connections > 0 {

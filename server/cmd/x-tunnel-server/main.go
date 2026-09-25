@@ -8,18 +8,18 @@ import (
 	"os/signal"
 	"syscall"
 
-	"x-tunnel/server/pkg"
+	"github.com/v2up-32mb/xtunnel"
 )
 
 // renderServerLog 壳接管服务端核心日志：按等级/模块渲染（与客户端统一风格 [等级][模块]）
-func renderServerLog(ev server.LogEvent) {
+func renderServerLog(ev xtunnel.LogEvent) {
 	level := "DEBUG"
 	switch ev.Level {
-	case server.LevelInfo:
+	case xtunnel.LevelInfo:
 		level = "INFO"
-	case server.LevelWarn:
+	case xtunnel.LevelWarn:
 		level = "WARN"
-	case server.LevelError:
+	case xtunnel.LevelError:
 		level = "ERROR"
 	}
 	log.Printf("[%s][%s] %s", level, ev.Module, fmt.Sprintf(ev.Format, ev.Args...))
@@ -38,13 +38,13 @@ func shellFatalf(format string, args ...any) {
 
 func main() {
 	// 服务端核心默认静默，由壳接管全部日志输出
-	server.SetLogf(renderServerLog)
+	xtunnel.SetLogf(renderServerLog)
 	shellLog("INFO", "[服务端] 程序启动")
 	flag.Parse()
 
 	cfg := parseFlags()
 
-	s, err := server.NewServer(cfg)
+	s, err := xtunnel.NewServer(cfg)
 	if err != nil {
 		shellFatalf("[服务端] 创建服务端失败: %v", err)
 	}
@@ -91,7 +91,7 @@ var (
 	maxReverseListeners    int
 )
 
-func parseFlags() *server.Config {
+func parseFlags() *xtunnel.ServerConfig {
 	if err := applyServerFileConfig(configFile, visitedFlags()); err != nil {
 		shellFatalf("[服务端] 读取配置文件失败: %v", err)
 	}
@@ -108,7 +108,7 @@ func parseFlags() *server.Config {
 		autoCert = false
 	}
 
-	cfg := server.DefaultConfig()
+	cfg := xtunnel.DefaultServerConfig()
 	cfg.ListenAddr = listenAddr
 	cfg.Token = token
 	cfg.CertFile = certFile
