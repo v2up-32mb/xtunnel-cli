@@ -1,3 +1,8 @@
+# AGENTS.md — x-tunnel (xtunnel-cli) 开发计划
+
+> 说明：本文件采用通用的 `AGENTS.md` 命名（取代 Claude 专有命名 `CLAUDE.md`），
+> 任何 agent / 编辑器 / 工具均按此约定读取。
+
 # x-tunnel 开发计划
 
 ## 项目概述
