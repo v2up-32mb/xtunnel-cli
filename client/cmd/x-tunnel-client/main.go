@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,8 +19,11 @@ import (
 	"github.com/v2up-32mb/xtunnel/protocol"
 )
 
-// renderXtunnelLog 壳接管核心库日志：按等级/模块渲染
+// renderXtunnelLog 壳接管核心库日志：按 -log-level 过滤后按等级/模块渲染
 func renderXtunnelLog(ev xtunnel.LogEvent) {
+	if ev.Level < xtunnel.LogLevel(minLogLevel.Load()) {
+		return
+	}
 	level := "DEBUG"
 	switch ev.Level {
 	case xtunnel.LevelInfo:
@@ -32,8 +36,42 @@ func renderXtunnelLog(ev xtunnel.LogEvent) {
 	log.Printf("[%s][%s] %s", level, ev.Module, fmt.Sprintf(ev.Format, ev.Args...))
 }
 
-// shellLog 壳自身日志：与核心事件统一显示风格 [等级][shell] 消息
+// minLogLevel 壳最低输出等级（xtunnel.LogLevel 值），由 -log-level 设置。
+// 启动早期由 main 设置；此后只读（核心/壳多 goroutine 并发读，atomic 保证一致）。
+var minLogLevel atomic.Int32
+
+// setMinLogLevel 解析 -log-level 并设置最低输出等级；非法值直接 Fatal。
+func setMinLogLevel() {
+	switch strings.ToLower(strings.TrimSpace(logLevel)) {
+	case "", "debug":
+		minLogLevel.Store(int32(xtunnel.LevelDebug))
+	case "info":
+		minLogLevel.Store(int32(xtunnel.LevelInfo))
+	case "warn":
+		minLogLevel.Store(int32(xtunnel.LevelWarn))
+	case "error":
+		minLogLevel.Store(int32(xtunnel.LevelError))
+	default:
+		shellFatalf("[客户端] 非法日志等级 %q (可选: debug/info/warn/error)", logLevel)
+	}
+}
+
+// shellLog 壳自身日志：与核心事件统一显示风格 [等级][shell] 消息，受 -log-level 过滤
 func shellLog(level string, format string, args ...any) {
+	var lvl xtunnel.LogLevel
+	switch level {
+	case "DEBUG":
+		lvl = xtunnel.LevelDebug
+	case "WARN":
+		lvl = xtunnel.LevelWarn
+	case "ERROR":
+		lvl = xtunnel.LevelError
+	default:
+		lvl = xtunnel.LevelInfo
+	}
+	if lvl < xtunnel.LogLevel(minLogLevel.Load()) {
+		return
+	}
 	log.Printf("[%s][shell] %s", level, fmt.Sprintf(format, args...))
 }
 
@@ -46,9 +84,10 @@ func shellFatalf(format string, args ...any) {
 func main() {
 	// 核心库静默，由壳接管全部日志输出（等级/模块/格式由壳决定）
 	xtunnel.SetLogf(renderXtunnelLog)
-	shellLog("INFO", "[客户端] 程序启动")
 	flag.Parse()
+	setMinLogLevel() // -log-level 解析（非法则退出）
 
+	shellLog("INFO", "[客户端] 程序启动")
 	cfg := parseFlags()
 
 	// 构建路由绕过 matcher
@@ -124,6 +163,7 @@ func init() {
 }
 
 func registerFlags(fs *flag.FlagSet) {
+	fs.StringVar(&logLevel, "log-level", "info", "日志等级: debug/info/warn/error")
 	fs.StringVar(&configFile, "config", "", "JSON 配置文件路径（可选，CLI 参数优先级更高）")
 	fs.StringVar(&listenAddr, "l", "", "监听地址 (支持 socks5:// 或 http://,支持多个用逗号分隔)\n示例:\n  socks5://[user:pass@]0.0.0.0:1080\n  http://[user:pass@]0.0.0.0:8080")
 	fs.StringVar(&forwardAddr, "f", "", "服务端地址 (仅客户端模式,必须是 wss://host:port/path)")
@@ -157,6 +197,7 @@ func registerFlags(fs *flag.FlagSet) {
 
 var (
 	udpBlockedPorts         []int
+	logLevel                string
 	configFile              string
 	listenAddr              string
 	forwardAddr             string
