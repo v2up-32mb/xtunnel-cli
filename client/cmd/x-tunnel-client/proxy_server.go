@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	xsharedconfig "github.com/v2up-32mb/xshared/config"
 	xsharedhttpproxy "github.com/v2up-32mb/xshared/httpproxy"
 	xsharedsocks5 "github.com/v2up-32mb/xshared/socks5"
@@ -31,6 +33,7 @@ func startSocks5Listener(addr string, c *xtunnel.Client) error {
 	if bypassMatcher != nil {
 		opts = append(opts, xsharedsocks5.WithBypassMatcher(bypassMatcher))
 	}
+	opts = append(opts, xsharedsocks5.WithTunnelIdleTimeout(120*time.Second))
 	return xsharedsocks5.NewServer(cfg, c.ProxyDialer(), opts...).Start()
 }
 
@@ -53,5 +56,6 @@ func startHTTPListener(addr string, c *xtunnel.Client) error {
 	if bypassMatcher != nil {
 		opts = append(opts, xsharedhttpproxy.WithBypassMatcher(bypassMatcher))
 	}
+	opts = append(opts, xsharedhttpproxy.WithTunnelIdleTimeout(120*time.Second))
 	return xsharedhttpproxy.NewServer(cfg, c.StreamDialer(), opts...).Start()
 }

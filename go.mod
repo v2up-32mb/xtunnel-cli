@@ -4,8 +4,8 @@ go 1.25.5
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/v2up-32mb/xshared v0.1.1
-	github.com/v2up-32mb/xtunnel v0.3.1
+	github.com/v2up-32mb/xshared v0.1.5
+	github.com/v2up-32mb/xtunnel v0.3.4
 )
 
 require (
